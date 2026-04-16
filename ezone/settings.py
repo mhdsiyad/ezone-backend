@@ -105,6 +105,9 @@ else:
 
 CORS_ALLOW_CREDENTIALS = True
 
+# CSRF Security for HTTPS Proxies
+CSRF_TRUSTED_ORIGINS = [f"https://{host}" for host in ALLOWED_HOSTS if host != "*"]
+
 # DRF
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
