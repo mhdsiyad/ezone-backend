@@ -29,6 +29,7 @@ INSTALLED_APPS = [
     'channels',
     # Local
     'auction',
+    'teams',
 ]
 
 MIDDLEWARE = [
