@@ -4,6 +4,12 @@ from channels.generic.websocket import AsyncWebsocketConsumer
 from channels.db import database_sync_to_async
 from django.utils import timezone
 
+# In-memory spectator tracking: { group_name: set(channel_names) }
+_spectators: dict = {}
+
+# Track which team IDs have an active captain WebSocket: { group_name: set(team_id) }
+_online_teams: dict = {}
+
 
 class AuctionConsumer(AsyncWebsocketConsumer):
     """
@@ -12,7 +18,7 @@ class AuctionConsumer(AsyncWebsocketConsumer):
 
     Server → Client events:
         auction_state, player_update, bid_update, timer_update, auction_status,
-        bid_countdown, teams_update, auction_end
+        bid_countdown, teams_update, auction_end, spectator_count, teams_online
 
     Client → Server events:
         place_bid, ping
@@ -21,10 +27,35 @@ class AuctionConsumer(AsyncWebsocketConsumer):
     async def connect(self):
         self.auction_id = self.scope['url_route']['kwargs']['auction_id']
         self.group_name = f'auction_{self.auction_id}'
+        self.online_team_id = None  # set below if captain
 
         # Join the auction channel group
         await self.channel_layer.group_add(self.group_name, self.channel_name)
         await self.accept()
+
+        # Track spectator count
+        if self.group_name not in _spectators:
+            _spectators[self.group_name] = set()
+        _spectators[self.group_name].add(self.channel_name)
+
+        await self.channel_layer.group_send(self.group_name, {
+            'type': 'spectator_count',
+            'count': len(_spectators[self.group_name]),
+        })
+
+        # Track captain's team as online
+        user = self.scope.get('user')
+        if user and user.is_authenticated and getattr(user, 'role', None) == 'captain':
+            team_id = await self._get_team_id(user)
+            if team_id:
+                self.online_team_id = team_id
+                if self.group_name not in _online_teams:
+                    _online_teams[self.group_name] = set()
+                _online_teams[self.group_name].add(team_id)
+                await self.channel_layer.group_send(self.group_name, {
+                    'type': 'teams_online',
+                    'team_ids': list(_online_teams.get(self.group_name, [])),
+                })
 
         # Send current auction state on connect
         state = await self.get_auction_state()
@@ -35,6 +66,39 @@ class AuctionConsumer(AsyncWebsocketConsumer):
             }))
 
     async def disconnect(self, close_code):
+        # Remove from spectator tracking with a short debounce to avoid
+        # reconnect flicker (React Strict Mode / auto-reconnect causes brief double-connect)
+        if self.group_name in _spectators:
+            _spectators[self.group_name].discard(self.channel_name)
+            count = len(_spectators[self.group_name])
+            if count == 0:
+                _spectators.pop(self.group_name, None)
+            # Debounce: wait briefly before broadcasting the lower count
+            await asyncio.sleep(1.5)
+            # Re-check count after the delay (new connection may have joined)
+            final_count = len(_spectators.get(self.group_name, set()))
+            try:
+                await self.channel_layer.group_send(self.group_name, {
+                    'type': 'spectator_count',
+                    'count': final_count,
+                })
+            except Exception:
+                pass  # group may no longer exist
+
+        # Remove captain's team from online teams
+        if self.online_team_id and self.group_name in _online_teams:
+            _online_teams[self.group_name].discard(self.online_team_id)
+            remaining = list(_online_teams.get(self.group_name, []))
+            if not remaining:
+                _online_teams.pop(self.group_name, None)
+            try:
+                await self.channel_layer.group_send(self.group_name, {
+                    'type': 'teams_online',
+                    'team_ids': remaining,
+                })
+            except Exception:
+                pass
+
         await self.channel_layer.group_discard(self.group_name, self.channel_name)
 
     async def receive(self, text_data):
@@ -105,6 +169,18 @@ class AuctionConsumer(AsyncWebsocketConsumer):
             )
 
     # ── Database helpers ────────────────────────────────────────────────────
+
+    @database_sync_to_async
+    def _get_team_id(self, user):
+        """Look up the team where captain_username matches the connected user's username."""
+        from .models import Team
+        try:
+            team = Team.objects.get(captain_username=user.username)
+            return team.id
+        except Team.DoesNotExist:
+            return None
+        except Exception:
+            return None
 
     @database_sync_to_async
     def get_auction_state(self):
@@ -257,4 +333,16 @@ class AuctionConsumer(AsyncWebsocketConsumer):
         await self.send(text_data=json.dumps({
             'type': 'auction_end',
             'results': event['results']
+        }))
+
+    async def spectator_count(self, event):
+        await self.send(text_data=json.dumps({
+            'type': 'spectator_count',
+            'count': event['count'],
+        }))
+
+    async def teams_online(self, event):
+        await self.send(text_data=json.dumps({
+            'type': 'teams_online',
+            'team_ids': event['team_ids'],
         }))

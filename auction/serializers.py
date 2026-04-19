@@ -51,11 +51,12 @@ class BidSerializer(serializers.ModelSerializer):
 class AuctionTeamSerializer(serializers.ModelSerializer):
     id = serializers.IntegerField(source='team.id')
     name = serializers.CharField(source='team.name')
+    captain_username = serializers.CharField(source='team.captain_username', read_only=True)
     players_won = serializers.SerializerMethodField()
 
     class Meta:
         model = AuctionTeam
-        fields = ['id', 'name', 'balance', 'players_won']
+        fields = ['id', 'name', 'captain_username', 'balance', 'players_won']
 
     def get_players_won(self, obj):
         results = SoldResult.objects.filter(
