@@ -500,6 +500,15 @@ class AuctionControlView(APIView):
             results = SoldResult.objects.filter(auction=auction).select_related('player', 'team')
             results_data = SoldResultSerializer(results, many=True).data
 
+            # Broadcast final teams state BEFORE auction_end so completion screen
+            # always renders with the latest player rosters
+            final_teams = AuctionTeam.objects.filter(auction=auction).select_related('team')
+            final_teams_data = AuctionTeamSerializer(final_teams, many=True).data
+            get_channel_layer_broadcast(group_name, {
+                'type': 'teams_update',
+                'teams': final_teams_data,
+            })
+
             get_channel_layer_broadcast(group_name, {
                 'type': 'auction_end',
                 'results': results_data

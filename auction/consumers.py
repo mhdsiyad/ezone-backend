@@ -7,7 +7,10 @@ from django.utils import timezone
 # In-memory spectator tracking: { group_name: set(channel_names) }
 _spectators: dict = {}
 
-# Track which team IDs have an active captain WebSocket: { group_name: set(team_id) }
+# Track which teams have an active captain WebSocket.
+# Structure: { group_name: { team_id: channel_name } }
+# Keyed by channel_name so disconnect() can safely skip removal when a
+# page-refresh reconnect has already registered a fresh channel for the team.
 _online_teams: dict = {}
 
 
@@ -50,11 +53,14 @@ class AuctionConsumer(AsyncWebsocketConsumer):
             if team_id:
                 self.online_team_id = team_id
                 if self.group_name not in _online_teams:
-                    _online_teams[self.group_name] = set()
-                _online_teams[self.group_name].add(team_id)
+                    _online_teams[self.group_name] = {}
+                # Register this channel as the active WS for the team.
+                # If the captain reconnects, the new channel_name overwrites the
+                # old one, which lets disconnect() detect a stale removal.
+                _online_teams[self.group_name][team_id] = self.channel_name
                 await self.channel_layer.group_send(self.group_name, {
                     'type': 'teams_online',
-                    'team_ids': list(_online_teams.get(self.group_name, [])),
+                    'team_ids': list(_online_teams.get(self.group_name, {}).keys()),
                 })
 
         # Send current auction state on connect
@@ -64,6 +70,14 @@ class AuctionConsumer(AsyncWebsocketConsumer):
                 'type': 'auction_state',
                 'data': state
             }))
+
+        # Immediately push current teams_online snapshot to this specific client
+        # (they may have connected after captains were already online)
+        online_ids = list(_online_teams.get(self.group_name, {}).keys())
+        await self.send(text_data=json.dumps({
+            'type': 'teams_online',
+            'team_ids': online_ids,
+        }))
 
     async def disconnect(self, close_code):
         # Remove from spectator tracking with a short debounce to avoid
@@ -85,19 +99,27 @@ class AuctionConsumer(AsyncWebsocketConsumer):
             except Exception:
                 pass  # group may no longer exist
 
-        # Remove captain's team from online teams
-        if self.online_team_id and self.group_name in _online_teams:
-            _online_teams[self.group_name].discard(self.online_team_id)
-            remaining = list(_online_teams.get(self.group_name, []))
-            if not remaining:
-                _online_teams.pop(self.group_name, None)
-            try:
-                await self.channel_layer.group_send(self.group_name, {
-                    'type': 'teams_online',
-                    'team_ids': remaining,
-                })
-            except Exception:
-                pass
+        # Remove captain's team — reconnect-safe guard.
+        #
+        # After the 1.5s spectator sleep above, a page-refresh may have already
+        # run connect() and registered a NEW channel_name for the same team.
+        # We only remove the entry if OUR channel_name is still the registered
+        # one; if it was replaced, we leave it alone so the LIVE badge persists.
+        if self.online_team_id is not None:
+            group_teams = _online_teams.get(self.group_name, {})
+            if group_teams.get(self.online_team_id) == self.channel_name:
+                group_teams.pop(self.online_team_id, None)
+                if not group_teams:
+                    _online_teams.pop(self.group_name, None)
+                remaining = list(_online_teams.get(self.group_name, {}).keys())
+                try:
+                    await self.channel_layer.group_send(self.group_name, {
+                        'type': 'teams_online',
+                        'team_ids': remaining,
+                    })
+                except Exception:
+                    pass
+            # else: a newer reconnect already registered — don't touch it
 
         await self.channel_layer.group_discard(self.group_name, self.channel_name)
 
