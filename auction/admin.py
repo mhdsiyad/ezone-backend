@@ -1,5 +1,18 @@
 from django.contrib import admin
-from .models import User, Team, Auction, AuctionTeam, Player, Bid, SoldResult
+from .models import (
+    User,
+    Team,
+    Auction,
+    AuctionTeam,
+    Player,
+    Bid,
+    SoldResult,
+    FixtureSeason,
+    FixtureCompetition,
+    FixtureRosterEntry,
+    FixtureMatch,
+    FixtureLineup,
+)
 
 
 @admin.register(User)
@@ -53,3 +66,40 @@ class BidAdmin(admin.ModelAdmin):
 class SoldResultAdmin(admin.ModelAdmin):
     list_display = ['player', 'team', 'sold_price', 'auction', 'sold_at']
     list_filter = ['auction']
+
+
+class FixtureMatchInline(admin.TabularInline):
+    model = FixtureMatch
+    extra = 0
+
+
+@admin.register(FixtureCompetition)
+class FixtureCompetitionAdmin(admin.ModelAdmin):
+    list_display = ['title', 'season', 'auction', 'match_type', 'matches_per_pair', 'match_days']
+    list_filter = ['match_type', 'auction']
+    filter_horizontal = ['teams']
+    inlines = [FixtureMatchInline]
+
+
+@admin.register(FixtureSeason)
+class FixtureSeasonAdmin(admin.ModelAdmin):
+    list_display = ['name', 'is_active', 'created_at']
+    list_filter = ['is_active']
+
+
+@admin.register(FixtureRosterEntry)
+class FixtureRosterEntryAdmin(admin.ModelAdmin):
+    list_display = ['name', 'team', 'competition', 'is_custom', 'is_active']
+    list_filter = ['competition', 'team', 'is_custom', 'is_active']
+
+
+class FixtureLineupInline(admin.TabularInline):
+    model = FixtureLineup
+    extra = 0
+
+
+@admin.register(FixtureMatch)
+class FixtureMatchAdmin(admin.ModelAdmin):
+    list_display = ['competition', 'home_team', 'away_team', 'stage', 'match_day', 'status', 'home_score', 'away_score']
+    list_filter = ['competition', 'stage', 'status']
+    inlines = [FixtureLineupInline]

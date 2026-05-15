@@ -11,6 +11,9 @@ load_dotenv(BASE_DIR / '.env')
 SECRET_KEY = os.getenv('SECRET_KEY', 'default-insecure-key')
 
 DEBUG = os.getenv('DEBUG', 'False').lower() in ('true', '1', 't')
+print(f"DEBUG: {DEBUG}")
+print(f"MEDIA_URL: {os.getenv('MEDIA_URL')}")
+print(f"MEDIA_ROOT: {os.getenv('MEDIA_ROOT')}")
 
 ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', '*').split(',')
 
@@ -131,3 +134,6 @@ SIMPLE_JWT = {
     'REFRESH_TOKEN_LIFETIME': timedelta(days=1),
     'AUTH_HEADER_TYPES': ('Bearer',),
 }
+
+MEDIA_URL = os.getenv('MEDIA_URL', '/media/')
+MEDIA_ROOT = os.path.join(BASE_DIR, os.getenv('MEDIA_ROOT', 'media'))

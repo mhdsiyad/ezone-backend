@@ -1,7 +1,7 @@
 from rest_framework import generics, status
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny
-from .models import Team
+from .models import Team, Season
 from .serializers import TeamSerializer
 
 class PublicTeamListView(generics.ListAPIView):
@@ -9,11 +9,18 @@ class PublicTeamListView(generics.ListAPIView):
     permission_classes = [AllowAny]
 
     def get_queryset(self):
-        return Team.objects.filter(is_verified=True).order_by('-created_at')
+        return Team.objects.filter(is_verified=True).select_related('season').order_by('-created_at')
 
 class TeamApplyView(generics.CreateAPIView):
     serializer_class = TeamSerializer
     permission_classes = [AllowAny]
+
+    def perform_create(self, serializer):
+        active_season = Season.objects.filter(is_active=True).first()
+        if active_season and not serializer.validated_data.get('season'):
+            serializer.save(season=active_season)
+        else:
+            serializer.save()
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)

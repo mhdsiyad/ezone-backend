@@ -13,7 +13,19 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from .models import Auction, AuctionTeam, Bid, Player, SoldResult, Team
+from .models import (
+    Auction,
+    AuctionTeam,
+    Bid,
+    FixtureCompetition,
+    FixtureLineup,
+    FixtureMatch,
+    FixtureRosterEntry,
+    FixtureSeason,
+    Player,
+    SoldResult,
+    Team,
+)
 from .permissions import IsManagerPermission, IsCaptainPermission
 from .serializers import (
     AuctionCreateSerializer,
@@ -21,6 +33,12 @@ from .serializers import (
     AuctionListSerializer,
     AuctionTeamSerializer,
     BidSerializer,
+    FixtureCompetitionCreateSerializer,
+    FixtureCompetitionDetailSerializer,
+    FixtureCompetitionListSerializer,
+    FixtureMatchSerializer,
+    FixtureRosterEntrySerializer,
+    FixtureSeasonSerializer,
     PlayerSerializer,
     SoldResultSerializer,
     TeamCreateSerializer,
@@ -169,7 +187,7 @@ class TeamListCreateView(APIView):
 
     def get(self, request):
         teams = Team.objects.filter(created_by=request.user)
-        serializer = TeamSerializer(teams, many=True)
+        serializer = TeamSerializer(teams, many=True, context={'request': request})
         return Response(serializer.data)
 
     def post(self, request):
@@ -180,7 +198,12 @@ class TeamListCreateView(APIView):
         data = serializer.validated_data
 
         # Create team
-        team = Team.objects.create(name=data['name'], created_by=request.user)
+        team = Team.objects.create(
+            name=data['name'],
+            logo=data.get('logo'),
+            primary_color=data.get('primary_color', '#1F3322'),
+            created_by=request.user
+        )
 
         # Create captain user
         captain = User.objects.create_user(
@@ -204,6 +227,18 @@ class TeamListCreateView(APIView):
 
 class TeamDetailView(APIView):
     permission_classes = [IsManagerPermission]
+
+    def patch(self, request, pk):
+        try:
+            team = Team.objects.get(pk=pk, created_by=request.user)
+        except Team.DoesNotExist:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+
+        serializer = TeamSerializer(team, data=request.data, partial=True, context={'request': request})
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     def delete(self, request, pk):
         try:
@@ -534,11 +569,12 @@ class AuctionControlView(APIView):
         if current:
             # Push current player to the end of the line
             current.skipped = True
+            current.base_price = max(0, current.base_price - 5)
             max_order = Player.objects.filter(
                 auction=auction
             ).order_by('-order').values_list('order', flat=True).first() or 0
             current.order = max_order + 1
-            current.save(update_fields=['skipped', 'order'])
+            current.save(update_fields=['skipped', 'order', 'base_price'])
 
         players = list(Player.objects.filter(auction=auction, sold=False, skipped=False).order_by('order'))
 
@@ -640,14 +676,14 @@ async def _handle_timer_expired(auction_id, channel_layer, group_name):
             # No bids → mark UNSOLD, push to end of queue
             player = auction.current_player
             player.skipped = True
-            player.save(update_fields=['skipped'])
+            player.base_price = max(0, player.base_price - 5)
 
             # Move to end by updating order
             max_order = Player.objects.filter(
                 auction=auction
             ).order_by('-order').values_list('order', flat=True).first() or 0
             player.order = max_order + 1
-            player.save(update_fields=['order'])
+            player.save(update_fields=['skipped', 'order', 'base_price'])
 
             auction.status = 'pending'
             auction.save(update_fields=['status'])
@@ -731,11 +767,12 @@ async def _run_countdown(auction_id, stop_event):
             # No bid — mark UNSOLD and advance to back of queue
             player = auction.current_player
             player.skipped = True
+            player.base_price = max(0, player.base_price - 5)
             max_order = Player.objects.filter(
                 auction=auction
             ).order_by('-order').values_list('order', flat=True).first() or 0
             player.order = max_order + 1
-            player.save(update_fields=['skipped', 'order'])
+            player.save(update_fields=['skipped', 'order', 'base_price'])
             sold_msg = 'UNSOLD'
         else:
             # Record the sale
@@ -977,3 +1014,589 @@ class ResultListView(APIView):
 
         results = SoldResult.objects.filter(auction=auction).select_related('player', 'team')
         return Response(SoldResultSerializer(results, many=True).data)
+
+
+# ── Fixture Views ─────────────────────────────────────────────────────────────
+
+def _fixture_table(competition, request=None):
+    teams = list(competition.teams.all())
+    rows = {
+        team.id: {
+            'team_id': team.id,
+            'team_name': team.name,
+            'team_logo': request.build_absolute_uri(team.logo.url) if team.logo and request else (team.logo.url if team.logo else None),
+            'team_color': team.primary_color,
+            'played': 0,
+            'won': 0,
+            'drawn': 0,
+            'lost': 0,
+            'goals_for': 0,
+            'goals_against': 0,
+            'goal_difference': 0,
+            'points': 0,
+        }
+        for team in teams
+    }
+
+    matches = FixtureMatch.objects.filter(
+        competition=competition, status='completed'
+    ).select_related('home_team', 'away_team')
+    for match in matches:
+        home = rows.get(match.home_team_id)
+        away = rows.get(match.away_team_id)
+        if not home or not away:
+            continue
+
+        home['played'] += 1
+        away['played'] += 1
+        home['goals_for'] += match.home_score
+        home['goals_against'] += match.away_score
+        away['goals_for'] += match.away_score
+        away['goals_against'] += match.home_score
+
+        if match.home_score > match.away_score:
+            home['won'] += 1
+            away['lost'] += 1
+            home['points'] += 3
+        elif match.home_score < match.away_score:
+            away['won'] += 1
+            home['lost'] += 1
+            away['points'] += 3
+        else:
+            home['drawn'] += 1
+            away['drawn'] += 1
+            home['points'] += 1
+            away['points'] += 1
+
+    for row in rows.values():
+        row['goal_difference'] = row['goals_for'] - row['goals_against']
+
+    return sorted(
+        rows.values(),
+        key=lambda row: (
+            row['points'],
+            row['goal_difference'],
+            row['goals_for'],
+            row['team_name'].lower(),
+        ),
+        reverse=True,
+    )
+
+
+def _fixture_player_stats(competition, request=None):
+    stats = {}
+    lineups = FixtureLineup.objects.filter(
+        match__competition=competition,
+        match__status='completed',
+    ).select_related(
+        'home_player',
+        'away_player',
+        'match__home_team',
+        'match__away_team',
+    )
+
+    def ensure(player, roster_entry, team):
+        if not player and not roster_entry:
+            return None
+        stat_id = f"roster-{roster_entry.id}" if roster_entry else f"player-{player.id}"
+        player_name = roster_entry.name if roster_entry else player.name
+        player_id = roster_entry.player_id if roster_entry else player.id
+        roster_entry_id = roster_entry.id if roster_entry else None
+        if stat_id not in stats:
+            stats[stat_id] = {
+                'player_id': player_id,
+                'roster_entry_id': roster_entry_id,
+                'player_name': player_name,
+                'team_id': team.id,
+                'team_name': team.name,
+                'team_logo': request.build_absolute_uri(team.logo.url) if team.logo and request else (team.logo.url if team.logo else None),
+                'team_color': team.primary_color,
+                'goals': 0,
+                'goals_against': 0,
+                'matches': 0,
+            }
+        return stats[stat_id]
+
+    for lineup in lineups:
+        home = ensure(lineup.home_player, lineup.home_roster_entry, lineup.match.home_team)
+        away = ensure(lineup.away_player, lineup.away_roster_entry, lineup.match.away_team)
+        if home:
+            home['goals'] += lineup.home_goals
+            home['goals_against'] += lineup.away_goals
+            home['matches'] += 1
+        if away:
+            away['goals'] += lineup.away_goals
+            away['goals_against'] += lineup.home_goals
+            away['matches'] += 1
+
+    goal_stats = sorted(
+        stats.values(),
+        key=lambda row: (row['goals'], -row['goals_against'], row['player_name'].lower()),
+        reverse=True,
+    )[:10]
+    defence_stats = sorted(
+        [row for row in stats.values() if row['matches'] > 0],
+        key=lambda row: (
+            row['goals_against'] / max(row['matches'], 1),
+            row['goals_against'],
+            -row['goals'],
+            row['player_name'].lower(),
+        ),
+    )[:10]
+    return goal_stats, defence_stats
+
+
+def _generate_league_matches(competition, teams):
+    if not teams:
+        return
+
+    # Proper Round-Robin Scheduling (Circle Method)
+    team_list = list(teams)
+    if len(team_list) % 2 != 0:
+        team_list.append(None)  # Add dummy team for 'bye'
+
+    n = len(team_list)
+    base_rounds = []
+    
+    # Generate one full round-robin set (N-1 rounds)
+    temp_teams = list(team_list)
+    for r in range(n - 1):
+        round_matches = []
+        for i in range(n // 2):
+            home = temp_teams[i]
+            away = temp_teams[n - 1 - i]
+            if home and away:
+                # Alternate home/away for balance
+                if r % 2 == 0:
+                    round_matches.append((home, away))
+                else:
+                    round_matches.append((away, home))
+        base_rounds.append(round_matches)
+        # Rotate: keep index 0, move last to second position
+        temp_teams = [temp_teams[0]] + [temp_teams[-1]] + temp_teams[1:-1]
+
+    # Handle multiple legs (e.g. Home and Away)
+    all_legs_rounds = []
+    for leg in range(competition.matches_per_pair):
+        for r_idx, r_matches in enumerate(base_rounds):
+            leg_round = []
+            for home, away in r_matches:
+                if leg % 2 == 0:
+                    leg_round.append((home, away))
+                else:
+                    leg_round.append((away, home))
+            all_legs_rounds.append(leg_round)
+
+    # Map rounds to match days
+    fixture_matches = []
+    order = 0
+    
+    for round_idx, round_matches in enumerate(all_legs_rounds):
+        # We use the configured match_days. 
+        # Ideally, match_days >= len(all_legs_rounds) to avoid double matches.
+        m_day = (round_idx % competition.match_days) + 1
+        
+        for home, away in round_matches:
+            fixture_matches.append(FixtureMatch(
+                competition=competition,
+                home_team=home,
+                away_team=away,
+                stage='league',
+                match_day=m_day,
+                order=order,
+            ))
+            order += 1
+
+    FixtureMatch.objects.bulk_create(fixture_matches)
+
+
+def _seed_fixture_rosters(competition, teams):
+    sold_results = SoldResult.objects.filter(
+        auction=competition.auction,
+        team__in=teams,
+    ).select_related('team', 'player')
+    for result in sold_results:
+        FixtureRosterEntry.objects.get_or_create(
+            competition=competition,
+            team=result.team,
+            name=result.player.name,
+            defaults={
+                'player': result.player,
+                'is_custom': False,
+                'is_active': True,
+            }
+        )
+
+
+class FixtureCompetitionListCreateView(APIView):
+    permission_classes = [IsManagerPermission]
+
+    def get(self, request, auction_id):
+        try:
+            auction = Auction.objects.get(id=auction_id, manager=request.user)
+        except Auction.DoesNotExist:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+
+        competitions = FixtureCompetition.objects.filter(auction=auction)
+        return Response(FixtureCompetitionListSerializer(competitions, many=True).data)
+
+    def post(self, request, auction_id):
+        try:
+            auction = Auction.objects.get(id=auction_id, manager=request.user)
+        except Auction.DoesNotExist:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+
+        serializer = FixtureCompetitionCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        teams = list(Team.objects.filter(
+            id__in=data['team_ids'],
+            auctionteam__auction=auction,
+        ).distinct())
+        if len(teams) != len(set(data['team_ids'])):
+            return Response(
+                {'error': 'One or more team IDs are not assigned to this auction.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        competition = FixtureCompetition.objects.create(
+            auction=auction,
+            season_id=data.get('season'),
+            title=data['title'],
+            match_type=data['match_type'],
+            matches_per_pair=data['matches_per_pair'],
+            match_days=data['match_days'],
+            semifinal_qualifiers=data['semifinal_qualifiers'],
+        )
+        competition.teams.set(teams)
+        _seed_fixture_rosters(competition, teams)
+        _generate_league_matches(competition, teams)
+
+        return Response(
+            FixtureCompetitionListSerializer(competition).data,
+            status=status.HTTP_201_CREATED
+        )
+
+
+class FixtureSeasonListCreateView(APIView):
+    permission_classes = [IsManagerPermission]
+
+    def get(self, request):
+        seasons = FixtureSeason.objects.all()
+        return Response(FixtureSeasonSerializer(seasons, many=True).data)
+
+    def post(self, request):
+        name = request.data.get('name', '').strip()
+        if not name:
+            return Response({'error': 'Season name is required.'}, status=400)
+        season, created = FixtureSeason.objects.get_or_create(
+            name=name,
+            defaults={'is_active': bool(request.data.get('is_active', True))}
+        )
+        return Response(
+            FixtureSeasonSerializer(season).data,
+            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK
+        )
+
+
+class FixtureCompetitionDetailView(APIView):
+    permission_classes = [IsManagerPermission]
+
+    def get_object(self, request, auction_id, fixture_id):
+        return FixtureCompetition.objects.get(
+            id=fixture_id, auction_id=auction_id, auction__manager=request.user
+        )
+
+    def get(self, request, auction_id, fixture_id):
+        try:
+            competition = self.get_object(request, auction_id, fixture_id)
+        except FixtureCompetition.DoesNotExist:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+
+        goal_stats, defence_stats = _fixture_player_stats(competition, request)
+        serializer = FixtureCompetitionDetailSerializer(
+            competition,
+            context={
+                'request': request,
+                'table': _fixture_table(competition, request),
+                'goal_stats': goal_stats,
+                'defence_stats': defence_stats,
+            }
+        )
+        return Response(serializer.data)
+
+    def delete(self, request, auction_id, fixture_id):
+        try:
+            competition = self.get_object(request, auction_id, fixture_id)
+        except FixtureCompetition.DoesNotExist:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+        competition.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class FixtureMatchUpdateView(APIView):
+    permission_classes = [IsManagerPermission]
+
+    def patch(self, request, auction_id, fixture_id, match_id):
+        try:
+            match = FixtureMatch.objects.select_related('competition').get(
+                id=match_id,
+                competition_id=fixture_id,
+                competition__auction_id=auction_id,
+                competition__auction__manager=request.user,
+            )
+        except FixtureMatch.DoesNotExist:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+
+        lineups = request.data.get('lineups')
+        if isinstance(lineups, list):
+            match.lineups.all().delete()
+            home_total = 0
+            away_total = 0
+            for index, row in enumerate(lineups):
+                home_roster_entry_id = row.get('home_roster_entry')
+                away_roster_entry_id = row.get('away_roster_entry')
+                home_entry = FixtureRosterEntry.objects.filter(
+                    id=home_roster_entry_id,
+                    competition=match.competition,
+                    team=match.home_team,
+                    is_active=True,
+                ).first() if home_roster_entry_id else None
+                away_entry = FixtureRosterEntry.objects.filter(
+                    id=away_roster_entry_id,
+                    competition=match.competition,
+                    team=match.away_team,
+                    is_active=True,
+                ).first() if away_roster_entry_id else None
+                home_player_id = home_entry.player_id if home_entry else row.get('home_player')
+                away_player_id = away_entry.player_id if away_entry else row.get('away_player')
+                home_goals = max(0, int(row.get('home_goals') or 0))
+                away_goals = max(0, int(row.get('away_goals') or 0))
+
+                FixtureLineup.objects.create(
+                    match=match,
+                    home_roster_entry=home_entry,
+                    away_roster_entry=away_entry,
+                    home_player_id=home_player_id or None,
+                    away_player_id=away_player_id or None,
+                    home_goals=home_goals,
+                    away_goals=away_goals,
+                    order=index,
+                )
+                home_total += home_goals
+                away_total += away_goals
+
+            if match.competition.match_type == 'team':
+                home_wins = 0
+                away_wins = 0
+                for row in lineups:
+                    h_g = int(row.get('home_goals') or 0)
+                    a_g = int(row.get('away_goals') or 0)
+                    if h_g > a_g:
+                        home_wins += 1
+                    elif a_g > h_g:
+                        away_wins += 1
+                match.home_score = home_wins
+                match.away_score = away_wins
+            else:
+                match.home_score = home_total
+                match.away_score = away_total
+
+        if 'home_score' in request.data:
+            match.home_score = max(0, int(request.data.get('home_score') or 0))
+        if 'away_score' in request.data:
+            match.away_score = max(0, int(request.data.get('away_score') or 0))
+        if request.data.get('status') in {'upcoming', 'completed'}:
+            match.status = request.data['status']
+        if match.status == 'completed' and not match.played_at:
+            match.played_at = timezone.now()
+        if match.status == 'upcoming':
+            match.played_at = None
+
+        match.save(update_fields=[
+            'home_score', 'away_score', 'status', 'played_at'
+        ])
+        return Response(FixtureMatchSerializer(match).data)
+
+
+class FixtureKnockoutCreateView(APIView):
+    permission_classes = [IsManagerPermission]
+
+    def post(self, request, auction_id, fixture_id):
+        try:
+            competition = FixtureCompetition.objects.get(
+                id=fixture_id,
+                auction_id=auction_id,
+                auction__manager=request.user,
+            )
+        except FixtureCompetition.DoesNotExist:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+
+        stage = request.data.get('stage')
+        if stage not in {'semi', 'final'}:
+            return Response({'error': 'stage must be semi or final.'}, status=400)
+
+        team_ids = request.data.get('team_ids') or []
+        matches_per_pair = max(1, int(request.data.get('matches_per_pair') or 1))
+        if len(team_ids) < 2 or len(team_ids) % 2 != 0:
+            return Response(
+                {'error': 'Provide an even number of teams in team_ids.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        teams = list(Team.objects.filter(id__in=team_ids, fixture_competitions=competition))
+        team_by_id = {team.id: team for team in teams}
+        missing = [team_id for team_id in team_ids if team_id not in team_by_id]
+        if missing:
+            return Response({'error': 'One or more teams are not in this fixture.'}, status=400)
+
+        FixtureMatch.objects.filter(competition=competition, stage=stage).delete()
+        created = []
+        order = 0
+        match_day = competition.match_days + (1 if stage == 'semi' else 2)
+        for index in range(0, len(team_ids), 2):
+            first = team_by_id[team_ids[index]]
+            second = team_by_id[team_ids[index + 1]]
+            for leg in range(matches_per_pair):
+                home_team, away_team = (first, second) if leg % 2 == 0 else (second, first)
+                created.append(FixtureMatch.objects.create(
+                    competition=competition,
+                    home_team=home_team,
+                    away_team=away_team,
+                    stage=stage,
+                    match_day=match_day,
+                    order=order,
+                ))
+                order += 1
+
+        return Response(FixtureMatchSerializer(created, many=True).data, status=201)
+
+
+class FixtureRosterEntryListCreateView(APIView):
+    permission_classes = [IsManagerPermission]
+
+    def get_competition(self, request, auction_id, fixture_id):
+        return FixtureCompetition.objects.get(
+            id=fixture_id,
+            auction_id=auction_id,
+            auction__manager=request.user,
+        )
+
+    def get(self, request, auction_id, fixture_id):
+        try:
+            competition = self.get_competition(request, auction_id, fixture_id)
+        except FixtureCompetition.DoesNotExist:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+        entries = FixtureRosterEntry.objects.filter(competition=competition).select_related('team', 'player')
+        return Response(FixtureRosterEntrySerializer(entries, many=True).data)
+
+    def post(self, request, auction_id, fixture_id):
+        try:
+            competition = self.get_competition(request, auction_id, fixture_id)
+        except FixtureCompetition.DoesNotExist:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+
+        team_id = request.data.get('team')
+        name = request.data.get('name', '').strip()
+        player_id = request.data.get('player')
+        if not team_id or not name:
+            return Response({'error': 'team and name are required.'}, status=400)
+        if not competition.teams.filter(id=team_id).exists():
+            return Response({'error': 'Team is not part of this fixture.'}, status=400)
+
+        entry = FixtureRosterEntry.objects.create(
+            competition=competition,
+            team_id=team_id,
+            player_id=player_id or None,
+            name=name,
+            is_custom=not bool(player_id),
+            is_active=True,
+        )
+        return Response(FixtureRosterEntrySerializer(entry).data, status=201)
+
+
+class FixtureRosterEntryDetailView(APIView):
+    permission_classes = [IsManagerPermission]
+
+    def patch(self, request, auction_id, fixture_id, entry_id):
+        try:
+            entry = FixtureRosterEntry.objects.get(
+                id=entry_id,
+                competition_id=fixture_id,
+                competition__auction_id=auction_id,
+                competition__auction__manager=request.user,
+            )
+        except FixtureRosterEntry.DoesNotExist:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+
+        if 'name' in request.data:
+            entry.name = request.data.get('name', '').strip() or entry.name
+        if 'is_active' in request.data:
+            entry.is_active = bool(request.data.get('is_active'))
+        entry.save(update_fields=['name', 'is_active'])
+        return Response(FixtureRosterEntrySerializer(entry).data)
+
+    def delete(self, request, auction_id, fixture_id, entry_id):
+        try:
+            entry = FixtureRosterEntry.objects.get(
+                id=entry_id,
+                competition_id=fixture_id,
+                competition__auction_id=auction_id,
+                competition__auction__manager=request.user,
+            )
+        except FixtureRosterEntry.DoesNotExist:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+        entry.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class PublicFixtureCompetitionListView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        competitions = FixtureCompetition.objects.select_related('auction').all()
+        return Response(FixtureCompetitionListSerializer(competitions, many=True).data)
+
+
+class PublicFixtureCompetitionDetailView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request, fixture_id):
+        try:
+            competition = FixtureCompetition.objects.get(id=fixture_id)
+        except FixtureCompetition.DoesNotExist:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+
+        goal_stats, defence_stats = _fixture_player_stats(competition, request)
+        serializer = FixtureCompetitionDetailSerializer(
+            competition,
+            context={
+                'request': request,
+                'table': _fixture_table(competition, request),
+                'goal_stats': goal_stats,
+                'defence_stats': defence_stats,
+            }
+        )
+        return Response(serializer.data)
+
+
+class PublicLatestFixtureCompetitionView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        competition = FixtureCompetition.objects.order_by('-created_at').first()
+        if not competition:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+
+        goal_stats, defence_stats = _fixture_player_stats(competition, request)
+        serializer = FixtureCompetitionDetailSerializer(
+            competition,
+            context={
+                'request': request,
+                'table': _fixture_table(competition, request),
+                'goal_stats': goal_stats,
+                'defence_stats': defence_stats,
+            }
+        )
+        return Response(serializer.data)

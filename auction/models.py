@@ -17,6 +17,8 @@ class User(AbstractUser):
 
 class Team(models.Model):
     name = models.CharField(max_length=100)
+    logo = models.ImageField(upload_to='team_logos/', null=True, blank=True)
+    primary_color = models.CharField(max_length=7, default='#1F3322')
     captain_username = models.CharField(max_length=150, blank=True, default='')
     created_by = models.ForeignKey(
         User, on_delete=models.CASCADE, related_name='created_teams'
@@ -131,3 +133,134 @@ class SoldResult(models.Model):
 
     def __str__(self):
         return f"{self.player.name} → {self.team.name} @ ${self.sold_price}"
+
+
+class FixtureSeason(models.Model):
+    name = models.CharField(max_length=120, unique=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return self.name
+
+
+class FixtureCompetition(models.Model):
+    MATCH_TYPE_CHOICES = [
+        ('single', 'Single Player Matches'),
+        ('team', 'Team Tournament'),
+    ]
+
+    auction = models.ForeignKey(
+        Auction, on_delete=models.CASCADE, related_name='fixture_competitions'
+    )
+    season = models.ForeignKey(
+        FixtureSeason, null=True, blank=True,
+        on_delete=models.SET_NULL, related_name='competitions'
+    )
+    title = models.CharField(max_length=200)
+    match_type = models.CharField(max_length=20, choices=MATCH_TYPE_CHOICES)
+    teams = models.ManyToManyField(Team, related_name='fixture_competitions', blank=True)
+    matches_per_pair = models.PositiveIntegerField(default=1)
+    match_days = models.PositiveIntegerField(default=1)
+    semifinal_qualifiers = models.PositiveIntegerField(default=4)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.title} ({self.auction_id})"
+
+
+class FixtureRosterEntry(models.Model):
+    competition = models.ForeignKey(
+        FixtureCompetition, on_delete=models.CASCADE, related_name='roster_entries'
+    )
+    team = models.ForeignKey(Team, on_delete=models.CASCADE, related_name='fixture_roster_entries')
+    player = models.ForeignKey(
+        Player, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='fixture_roster_entries'
+    )
+    name = models.CharField(max_length=100)
+    is_custom = models.BooleanField(default=False)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['team__name', 'name']
+        unique_together = ('competition', 'team', 'name')
+
+    def __str__(self):
+        return f"{self.name} - {self.team.name}"
+
+
+class FixtureMatch(models.Model):
+    STAGE_CHOICES = [
+        ('league', 'League'),
+        ('semi', 'Semi Final'),
+        ('final', 'Final'),
+    ]
+    STATUS_CHOICES = [
+        ('upcoming', 'Upcoming'),
+        ('completed', 'Completed'),
+    ]
+
+    competition = models.ForeignKey(
+        FixtureCompetition, on_delete=models.CASCADE, related_name='matches'
+    )
+    home_team = models.ForeignKey(
+        Team, on_delete=models.CASCADE, related_name='home_fixture_matches'
+    )
+    away_team = models.ForeignKey(
+        Team, on_delete=models.CASCADE, related_name='away_fixture_matches'
+    )
+    stage = models.CharField(max_length=20, choices=STAGE_CHOICES, default='league')
+    match_day = models.PositiveIntegerField(default=1)
+    order = models.PositiveIntegerField(default=0)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='upcoming')
+    home_score = models.PositiveIntegerField(default=0)
+    away_score = models.PositiveIntegerField(default=0)
+    played_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['match_day', 'order', 'id']
+
+    def __str__(self):
+        return f"{self.home_team.name} vs {self.away_team.name}"
+
+
+class FixtureLineup(models.Model):
+    match = models.ForeignKey(
+        FixtureMatch, on_delete=models.CASCADE, related_name='lineups'
+    )
+    home_player = models.ForeignKey(
+        Player, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='home_fixture_lineups'
+    )
+    away_player = models.ForeignKey(
+        Player, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='away_fixture_lineups'
+    )
+    home_roster_entry = models.ForeignKey(
+        FixtureRosterEntry, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='home_fixture_lineups'
+    )
+    away_roster_entry = models.ForeignKey(
+        FixtureRosterEntry, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='away_fixture_lineups'
+    )
+    home_goals = models.PositiveIntegerField(default=0)
+    away_goals = models.PositiveIntegerField(default=0)
+    order = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        ordering = ['order', 'id']
+
+    def __str__(self):
+        home = self.home_player.name if self.home_player else 'TBD'
+        away = self.away_player.name if self.away_player else 'TBD'
+        return f"{home} vs {away}"
