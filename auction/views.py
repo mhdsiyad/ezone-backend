@@ -1142,7 +1142,7 @@ def _fixture_player_stats(competition, request=None):
         stats.values(),
         key=lambda row: (row['goals'], -row['goals_against'], row['player_name'].lower()),
         reverse=True,
-    )[:10]
+    )
     defence_stats = sorted(
         [row for row in stats.values() if row['matches'] > 0],
         key=lambda row: (
@@ -1151,7 +1151,7 @@ def _fixture_player_stats(competition, request=None):
             -row['goals'],
             row['player_name'].lower(),
         ),
-    )[:10]
+    )
     return goal_stats, defence_stats
 
 
