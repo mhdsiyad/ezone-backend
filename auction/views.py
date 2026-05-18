@@ -1040,7 +1040,7 @@ def _fixture_table(competition, request=None):
 
     matches = FixtureMatch.objects.filter(
         competition=competition, status='completed'
-    ).select_related('home_team', 'away_team')
+    ).select_related('home_team', 'away_team').prefetch_related('lineups')
     for match in matches:
         home = rows.get(match.home_team_id)
         away = rows.get(match.away_team_id)
@@ -1049,10 +1049,19 @@ def _fixture_table(competition, request=None):
 
         home['played'] += 1
         away['played'] += 1
-        home['goals_for'] += match.home_score
-        home['goals_against'] += match.away_score
-        away['goals_for'] += match.away_score
-        away['goals_against'] += match.home_score
+        
+        lineups = list(match.lineups.all())
+        if competition.match_type == 'team' and lineups:
+            home_goals = sum(l.home_goals for l in lineups)
+            away_goals = sum(l.away_goals for l in lineups)
+        else:
+            home_goals = match.home_score
+            away_goals = match.away_score
+
+        home['goals_for'] += home_goals
+        home['goals_against'] += away_goals
+        away['goals_for'] += away_goals
+        away['goals_against'] += home_goals
 
         if match.home_score > match.away_score:
             home['won'] += 1
