@@ -1,6 +1,7 @@
 import asyncio
 import csv
 import io
+import math
 import threading
 
 from django.contrib.auth import get_user_model
@@ -25,6 +26,7 @@ from .models import (
     Player,
     SoldResult,
     Team,
+    CustomTournament,
 )
 from .permissions import IsManagerPermission, IsCaptainPermission
 from .serializers import (
@@ -36,6 +38,7 @@ from .serializers import (
     FixtureCompetitionCreateSerializer,
     FixtureCompetitionDetailSerializer,
     FixtureCompetitionListSerializer,
+    FixtureCompetitionStatusUpdateSerializer,
     FixtureMatchSerializer,
     FixtureRosterEntrySerializer,
     FixtureSeasonSerializer,
@@ -43,6 +46,8 @@ from .serializers import (
     SoldResultSerializer,
     TeamCreateSerializer,
     TeamSerializer,
+    UserSerializer,
+    CustomTournamentSerializer,
 )
 
 User = get_user_model()
@@ -1123,36 +1128,69 @@ def _fixture_player_stats(competition, request=None):
                 'goals': 0,
                 'goals_against': 0,
                 'matches': 0,
+                # Track per-match goals conceded to correctly aggregate defence stats
+                '_match_goals_against': {},  # match_id -> goals conceded in that match
             }
         return stats[stat_id]
 
     for lineup in lineups:
         home = ensure(lineup.home_player, lineup.home_roster_entry, lineup.match.home_team)
         away = ensure(lineup.away_player, lineup.away_roster_entry, lineup.match.away_team)
+        match_id = lineup.match_id
+
         if home:
             home['goals'] += lineup.home_goals
-            home['goals_against'] += lineup.away_goals
-            home['matches'] += 1
+            # Accumulate away goals (goals against home player) per match
+            home['_match_goals_against'].setdefault(match_id, 0)
+            home['_match_goals_against'][match_id] += lineup.away_goals
+
         if away:
             away['goals'] += lineup.away_goals
-            away['goals_against'] += lineup.home_goals
-            away['matches'] += 1
+            # Accumulate home goals (goals against away player) per match
+            away['_match_goals_against'].setdefault(match_id, 0)
+            away['_match_goals_against'][match_id] += lineup.home_goals
+
+    # Compute final match-level defence totals
+    for stat in stats.values():
+        match_goals = stat.pop('_match_goals_against', {})
+        stat['matches'] = len(match_goals)
+        stat['goals_against'] = sum(match_goals.values())
+
+    # Count total distinct completed league match days for the 25% minimum rule
+    completed_league_match_days = FixtureMatch.objects.filter(
+        competition=competition,
+        stage='league',
+        status='completed',
+    ).values_list('match_day', flat=True).distinct().count()
+
+    # A player must have played in at least 25% of completed league match days
+    # Use ceil so partial fractions always round UP (e.g. 25% of 5 days = 1.25 → needs 2 matches)
+    min_matches_required = max(1, math.ceil(completed_league_match_days * 0.25))
 
     goal_stats = sorted(
         stats.values(),
         key=lambda row: (row['goals'], -row['goals_against'], row['player_name'].lower()),
         reverse=True,
     )
+    # Defence: Include all players who played >= 1 match.
+    # Sort order: 
+    # 1. Qualified first (0) vs unqualified (1) based on the 25% rule
+    # 2. Total goals conceded (ascending)
+    # 3. Matches played (descending)
     defence_stats = sorted(
         [row for row in stats.values() if row['matches'] > 0],
         key=lambda row: (
-            row['goals_against'] / max(row['matches'], 1),
+            0 if row['matches'] >= min_matches_required else 1,
             row['goals_against'],
-            -row['goals'],
+            -row['matches'],
             row['player_name'].lower(),
         ),
     )
-    return goal_stats, defence_stats
+    stats_meta = {
+        'defence_min_matches': min_matches_required,
+        'defence_total_match_days': completed_league_match_days,
+    }
+    return goal_stats, defence_stats, stats_meta
 
 
 def _generate_league_matches(competition, teams):
@@ -1274,6 +1312,7 @@ class FixtureCompetitionListCreateView(APIView):
             season_id=data.get('season'),
             title=data['title'],
             match_type=data['match_type'],
+            format_type=data.get('format_type', 'ezone_custom'),
             matches_per_pair=data['matches_per_pair'],
             match_days=data['match_days'],
             semifinal_qualifiers=data['semifinal_qualifiers'],
@@ -1323,7 +1362,7 @@ class FixtureCompetitionDetailView(APIView):
         except FixtureCompetition.DoesNotExist:
             return Response(status=status.HTTP_404_NOT_FOUND)
 
-        goal_stats, defence_stats = _fixture_player_stats(competition, request)
+        goal_stats, defence_stats, stats_meta = _fixture_player_stats(competition, request)
         serializer = FixtureCompetitionDetailSerializer(
             competition,
             context={
@@ -1331,9 +1370,40 @@ class FixtureCompetitionDetailView(APIView):
                 'table': _fixture_table(competition, request),
                 'goal_stats': goal_stats,
                 'defence_stats': defence_stats,
+                'defence_stats_meta': stats_meta,
             }
         )
         return Response(serializer.data)
+
+    def patch(self, request, auction_id, fixture_id):
+        try:
+            competition = self.get_object(request, auction_id, fixture_id)
+        except FixtureCompetition.DoesNotExist:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+            
+        update_fields = []
+        if 'title' in request.data:
+            title = request.data.get('title', '').strip()
+            if not title:
+                return Response({'error': 'Title cannot be empty.'}, status=status.HTTP_400_BAD_REQUEST)
+            competition.title = title
+            update_fields.append('title')
+            
+        if 'format_type' in request.data:
+            format_type = request.data.get('format_type')
+            valid_formats = [c[0] for c in FixtureCompetition.FORMAT_TYPE_CHOICES]
+            if format_type in valid_formats:
+                competition.format_type = format_type
+                update_fields.append('format_type')
+
+        if update_fields:
+            competition.save(update_fields=update_fields)
+
+        return Response({
+            'id': competition.id, 
+            'title': competition.title,
+            'format_type': competition.format_type
+        })
 
     def delete(self, request, auction_id, fixture_id):
         try:
@@ -1342,6 +1412,26 @@ class FixtureCompetitionDetailView(APIView):
             return Response(status=status.HTTP_404_NOT_FOUND)
         competition.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class FixtureCompetitionStatusUpdateView(APIView):
+    permission_classes = [IsManagerPermission]
+
+    def patch(self, request, auction_id, fixture_id):
+        try:
+            competition = FixtureCompetition.objects.get(
+                id=fixture_id, auction_id=auction_id, auction__manager=request.user
+            )
+        except FixtureCompetition.DoesNotExist:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+
+        serializer = FixtureCompetitionStatusUpdateSerializer(
+            competition, data=request.data, partial=True
+        )
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
 class FixtureMatchUpdateView(APIView):
@@ -1428,6 +1518,37 @@ class FixtureMatchUpdateView(APIView):
         ])
         return Response(FixtureMatchSerializer(match).data)
 
+    def delete(self, request, auction_id, fixture_id, match_id):
+        try:
+            match = FixtureMatch.objects.select_related('competition').get(
+                id=match_id,
+                competition_id=fixture_id,
+                competition__auction_id=auction_id,
+                competition__auction__manager=request.user,
+            )
+        except FixtureMatch.DoesNotExist:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+        match.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+class FixtureStageDeleteView(APIView):
+    """Delete all matches belonging to a specific stage (quarter/semi/final)."""
+    permission_classes = [IsManagerPermission]
+
+    def delete(self, request, auction_id, fixture_id, stage):
+        if stage not in {'quarter', 'semi', 'final'}:
+            return Response({'error': 'stage must be quarter, semi or final.'}, status=400)
+        try:
+            competition = FixtureCompetition.objects.get(
+                id=fixture_id,
+                auction_id=auction_id,
+                auction__manager=request.user,
+            )
+        except FixtureCompetition.DoesNotExist:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+        count, _ = FixtureMatch.objects.filter(competition=competition, stage=stage).delete()
+        return Response({'deleted': count})
+
 
 class FixtureKnockoutCreateView(APIView):
     permission_classes = [IsManagerPermission]
@@ -1443,43 +1564,75 @@ class FixtureKnockoutCreateView(APIView):
             return Response(status=status.HTTP_404_NOT_FOUND)
 
         stage = request.data.get('stage')
-        if stage not in {'semi', 'final'}:
-            return Response({'error': 'stage must be semi or final.'}, status=400)
+        if stage not in {'quarter', 'semi', 'final'}:
+            return Response({'error': 'stage must be quarter, semi or final.'}, status=400)
 
-        team_ids = request.data.get('team_ids') or []
         matches_per_pair = max(1, int(request.data.get('matches_per_pair') or 1))
-        if len(team_ids) < 2 or len(team_ids) % 2 != 0:
-            return Response(
-                {'error': 'Provide an even number of teams in team_ids.'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
 
-        teams = list(Team.objects.filter(id__in=team_ids, fixture_competitions=competition))
-        team_by_id = {team.id: team for team in teams}
-        missing = [team_id for team_id in team_ids if team_id not in team_by_id]
-        if missing:
-            return Response({'error': 'One or more teams are not in this fixture.'}, status=400)
+        # Support custom pairs [[home_id, away_id], ...] OR legacy flat team_ids
+        pairs_raw = request.data.get('pairs')
+        if pairs_raw:
+            if not isinstance(pairs_raw, list) or len(pairs_raw) == 0:
+                return Response({'error': 'pairs must be a non-empty list of [home_id, away_id].'}, status=400)
+            for pair in pairs_raw:
+                if not isinstance(pair, list) or len(pair) != 2:
+                    return Response({'error': 'Each pair must be [home_id, away_id].'}, status=400)
+            all_ids = [tid for pair in pairs_raw for tid in pair]
+            teams_qs = list(Team.objects.filter(id__in=all_ids, fixture_competitions=competition))
+            team_by_id = {t.id: t for t in teams_qs}
+            missing = [tid for tid in all_ids if tid not in team_by_id]
+            if missing:
+                return Response({'error': 'One or more teams are not in this fixture.'}, status=400)
+            pairs = [[team_by_id[p[0]], team_by_id[p[1]]] for p in pairs_raw]
+        else:
+            team_ids = request.data.get('team_ids') or []
+            if len(team_ids) < 2 or len(team_ids) % 2 != 0:
+                return Response(
+                    {'error': 'Provide an even number of teams in team_ids.'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            teams_qs = list(Team.objects.filter(id__in=team_ids, fixture_competitions=competition))
+            team_by_id = {t.id: t for t in teams_qs}
+            missing = [tid for tid in team_ids if tid not in team_by_id]
+            if missing:
+                return Response({'error': 'One or more teams are not in this fixture.'}, status=400)
+            pairs = [
+                [team_by_id[team_ids[i]], team_by_id[team_ids[i + 1]]]
+                for i in range(0, len(team_ids), 2)
+            ]
 
+        # Delete existing matches for this stage before regenerating
         FixtureMatch.objects.filter(competition=competition, stage=stage).delete()
+
+        # Calculate starting match day based on previous stages
+        stages_order = ['league', 'quarter', 'semi', 'final']
+        current_index = stages_order.index(stage)
+        prev_stages = stages_order[:current_index]
+        
+        last_match = FixtureMatch.objects.filter(
+            competition=competition, 
+            stage__in=prev_stages
+        ).order_by('-match_day').first()
+        
+        match_day_start = (last_match.match_day if last_match else competition.match_days) + 1
+
         created = []
         order = 0
-        match_day = competition.match_days + (1 if stage == 'semi' else 2)
-        for index in range(0, len(team_ids), 2):
-            first = team_by_id[team_ids[index]]
-            second = team_by_id[team_ids[index + 1]]
+        for home_team, away_team in pairs:
             for leg in range(matches_per_pair):
-                home_team, away_team = (first, second) if leg % 2 == 0 else (second, first)
+                h, a = (home_team, away_team) if leg % 2 == 0 else (away_team, home_team)
                 created.append(FixtureMatch.objects.create(
                     competition=competition,
-                    home_team=home_team,
-                    away_team=away_team,
+                    home_team=h,
+                    away_team=a,
                     stage=stage,
-                    match_day=match_day,
+                    match_day=match_day_start + leg,
                     order=order,
                 ))
                 order += 1
 
         return Response(FixtureMatchSerializer(created, many=True).data, status=201)
+
 
 
 class FixtureRosterEntryListCreateView(APIView):
@@ -1560,12 +1713,76 @@ class FixtureRosterEntryDetailView(APIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+class CustomTournamentListCreateView(APIView):
+    permission_classes = [IsManagerPermission]
+
+    def get(self, request):
+        tournaments = CustomTournament.objects.filter(manager=request.user)
+        serializer = CustomTournamentSerializer(tournaments, many=True)
+        return Response(serializer.data)
+
+    def post(self, request):
+        serializer = CustomTournamentSerializer(data=request.data)
+        if serializer.is_valid():
+            serializer.save(manager=request.user)
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class CustomTournamentDetailView(APIView):
+    permission_classes = [IsManagerPermission]
+
+    def get_object(self, request, pk):
+        try:
+            return CustomTournament.objects.get(pk=pk, manager=request.user)
+        except CustomTournament.DoesNotExist:
+            return None
+
+    def get(self, request, pk):
+        tournament = self.get_object(request, pk)
+        if not tournament:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+        return Response(CustomTournamentSerializer(tournament).data)
+
+    def patch(self, request, pk):
+        tournament = self.get_object(request, pk)
+        if not tournament:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+        serializer = CustomTournamentSerializer(tournament, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    def delete(self, request, pk):
+        tournament = self.get_object(request, pk)
+        if not tournament:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+        tournament.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class PublicAuctionListView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        auctions = Auction.objects.filter(is_active=True).order_by('-created_at')
+        return Response(AuctionListSerializer(auctions, many=True).data)
+
+
 class PublicFixtureCompetitionListView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request):
-        competitions = FixtureCompetition.objects.select_related('auction').all()
-        return Response(FixtureCompetitionListSerializer(competitions, many=True).data)
+        competitions = FixtureCompetition.objects.select_related('auction', 'season', 'winner', 'runner_up').all()
+        comp_data = FixtureCompetitionListSerializer(competitions, many=True).data
+
+        custom_tournaments = CustomTournament.objects.all()
+        custom_data = CustomTournamentSerializer(custom_tournaments, many=True).data
+
+        combined = comp_data + custom_data
+        combined.sort(key=lambda x: x.get('created_at', ''), reverse=True)
+        return Response(combined)
 
 
 class PublicFixtureCompetitionDetailView(APIView):
@@ -1577,7 +1794,7 @@ class PublicFixtureCompetitionDetailView(APIView):
         except FixtureCompetition.DoesNotExist:
             return Response(status=status.HTTP_404_NOT_FOUND)
 
-        goal_stats, defence_stats = _fixture_player_stats(competition, request)
+        goal_stats, defence_stats, stats_meta = _fixture_player_stats(competition, request)
         serializer = FixtureCompetitionDetailSerializer(
             competition,
             context={
@@ -1585,11 +1802,22 @@ class PublicFixtureCompetitionDetailView(APIView):
                 'table': _fixture_table(competition, request),
                 'goal_stats': goal_stats,
                 'defence_stats': defence_stats,
+                'defence_stats_meta': stats_meta,
             }
         )
         return Response(serializer.data)
 
+class PublicCustomTournamentDetailView(APIView):
+    permission_classes = [AllowAny]
 
+    def get(self, request, pk):
+        try:
+            tournament = CustomTournament.objects.get(pk=pk)
+        except CustomTournament.DoesNotExist:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+        
+        serializer = CustomTournamentSerializer(tournament, context={'request': request})
+        return Response(serializer.data)
 class PublicLatestFixtureCompetitionView(APIView):
     permission_classes = [AllowAny]
 
@@ -1598,7 +1826,7 @@ class PublicLatestFixtureCompetitionView(APIView):
         if not competition:
             return Response(status=status.HTTP_404_NOT_FOUND)
 
-        goal_stats, defence_stats = _fixture_player_stats(competition, request)
+        goal_stats, defence_stats, stats_meta = _fixture_player_stats(competition, request)
         serializer = FixtureCompetitionDetailSerializer(
             competition,
             context={
@@ -1606,6 +1834,7 @@ class PublicLatestFixtureCompetitionView(APIView):
                 'table': _fixture_table(competition, request),
                 'goal_stats': goal_stats,
                 'defence_stats': defence_stats,
+                'defence_stats_meta': stats_meta,
             }
         )
         return Response(serializer.data)

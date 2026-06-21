@@ -153,6 +153,20 @@ class FixtureCompetition(models.Model):
         ('team', 'Team Tournament'),
     ]
 
+    FORMAT_TYPE_CHOICES = [
+        ('ezone_custom', 'League'),
+        ('top4_semi',    'Top 4 Semi Finals'),
+        ('top2_final',   'Top 2 Direct Final'),
+        ('knockout',     'Knockout Bracket'),
+        ('group_stage',  'Group Stage'),
+    ]
+
+    STATUS_CHOICES = [
+        ('upcoming', 'Upcoming'),
+        ('ongoing', 'Ongoing'),
+        ('completed', 'Completed'),
+    ]
+
     auction = models.ForeignKey(
         Auction, on_delete=models.CASCADE, related_name='fixture_competitions'
     )
@@ -162,17 +176,54 @@ class FixtureCompetition(models.Model):
     )
     title = models.CharField(max_length=200)
     match_type = models.CharField(max_length=20, choices=MATCH_TYPE_CHOICES)
+    format_type = models.CharField(max_length=100, blank=True, default='League')
     teams = models.ManyToManyField(Team, related_name='fixture_competitions', blank=True)
     matches_per_pair = models.PositiveIntegerField(default=1)
     match_days = models.PositiveIntegerField(default=1)
     semifinal_qualifiers = models.PositiveIntegerField(default=4)
+    status = models.CharField(
+        max_length=20, choices=STATUS_CHOICES, default='upcoming'
+    )
+    completion_percentage = models.PositiveIntegerField(default=0)
+    winner = models.ForeignKey(
+        Team, null=True, blank=True, on_delete=models.SET_NULL, related_name='won_fixture_competitions'
+    )
+    runner_up = models.ForeignKey(
+        Team, null=True, blank=True, on_delete=models.SET_NULL, related_name='runner_up_fixture_competitions'
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         ordering = ['-created_at']
 
+class CustomTournament(models.Model):
+    title = models.CharField(max_length=200)
+    format_type = models.CharField(max_length=100, blank=True, null=True)
+    status = models.CharField(
+        max_length=20, choices=FixtureCompetition.STATUS_CHOICES, default='upcoming'
+    )
+    completion_percentage = models.PositiveIntegerField(default=0)
+    winner_name = models.CharField(max_length=200, blank=True, null=True)
+    runner_up_name = models.CharField(max_length=200, blank=True, null=True)
+    manager = models.ForeignKey(User, on_delete=models.CASCADE, related_name='custom_tournaments')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    winner_banner_image = models.ImageField(upload_to='custom_tournaments/banners/', null=True, blank=True)
+    runner_up_logo = models.ImageField(upload_to='custom_tournaments/logos/', null=True, blank=True)
+    winner_description_1 = models.TextField(blank=True, null=True)
+    winner_description_2 = models.TextField(blank=True, null=True)
+    winner_quote = models.TextField(blank=True, null=True)
+    champions_squad = models.JSONField(default=list, blank=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return self.title
+
     def __str__(self):
         return f"{self.title} ({self.auction_id})"
+
 
 
 class FixtureRosterEntry(models.Model):
@@ -200,6 +251,7 @@ class FixtureRosterEntry(models.Model):
 class FixtureMatch(models.Model):
     STAGE_CHOICES = [
         ('league', 'League'),
+        ('quarter', 'Quarter Final'),
         ('semi', 'Semi Final'),
         ('final', 'Final'),
     ]

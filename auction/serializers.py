@@ -12,6 +12,7 @@ from .models import (
     FixtureRosterEntry,
     FixtureMatch,
     FixtureLineup,
+    CustomTournament,
 )
 
 
@@ -170,13 +171,27 @@ class FixtureCompetitionListSerializer(serializers.ModelSerializer):
     season_name = serializers.CharField(source='season.name', read_only=True)
     auction_title = serializers.CharField(source='auction.title', read_only=True)
 
+    status = serializers.CharField() # ensure it shows the model value
+    completion_percentage = serializers.SerializerMethodField()
+    winner_name = serializers.CharField(source='winner.name', read_only=True)
+    runner_up_name = serializers.CharField(source='runner_up.name', read_only=True)
+
     class Meta:
         model = FixtureCompetition
         fields = [
-            'id', 'title', 'season', 'season_name', 'auction', 'auction_title',
+            'id', 'title', 'format_type', 'season', 'season_name', 'auction', 'auction_title',
             'match_type', 'matches_per_pair', 'match_days',
-            'semifinal_qualifiers', 'teams_count', 'matches_count', 'created_at'
+            'semifinal_qualifiers', 'teams_count', 'matches_count', 
+            'status', 'completion_percentage', 'winner', 'winner_name', 'runner_up', 'runner_up_name',
+            'created_at'
         ]
+
+    def get_completion_percentage(self, obj):
+        total = obj.matches.count()
+        if total == 0:
+            return 0
+        completed = obj.matches.filter(status='completed').count()
+        return int(round((completed / float(total)) * 100))
 
     def get_teams_count(self, obj):
         return obj.teams.count()
@@ -194,15 +209,29 @@ class FixtureCompetitionDetailSerializer(serializers.ModelSerializer):
     table = serializers.SerializerMethodField()
     goal_stats = serializers.SerializerMethodField()
     defence_stats = serializers.SerializerMethodField()
+    defence_stats_meta = serializers.SerializerMethodField()
+
+    status = serializers.CharField()
+    completion_percentage = serializers.SerializerMethodField()
+    winner_name = serializers.CharField(source='winner.name', read_only=True)
+    runner_up_name = serializers.CharField(source='runner_up.name', read_only=True)
 
     class Meta:
         model = FixtureCompetition
         fields = [
-            'id', 'title', 'season', 'season_name', 'auction', 'auction_title',
+            'id', 'title', 'format_type', 'season', 'season_name', 'auction', 'auction_title',
             'match_type', 'matches_per_pair', 'match_days',
             'semifinal_qualifiers', 'teams', 'roster_entries', 'matches',
-            'table', 'goal_stats', 'defence_stats', 'created_at'
+            'status', 'completion_percentage', 'winner', 'winner_name', 'runner_up', 'runner_up_name',
+            'table', 'goal_stats', 'defence_stats', 'defence_stats_meta', 'created_at'
         ]
+
+    def get_completion_percentage(self, obj):
+        total = obj.matches.count()
+        if total == 0:
+            return 0
+        completed = obj.matches.filter(status='completed').count()
+        return int(round((completed / float(total)) * 100))
 
     def get_table(self, obj):
         return self.context.get('table', [])
@@ -220,16 +249,37 @@ class FixtureCompetitionDetailSerializer(serializers.ModelSerializer):
     def get_defence_stats(self, obj):
         return self.context.get('defence_stats', [])
 
+    def get_defence_stats_meta(self, obj):
+        return self.context.get('defence_stats_meta', {})
+
 
 class FixtureCompetitionCreateSerializer(serializers.Serializer):
     title = serializers.CharField(max_length=200)
     season = serializers.IntegerField(required=False, allow_null=True)
     match_type = serializers.ChoiceField(choices=FixtureCompetition.MATCH_TYPE_CHOICES)
+    format_type = serializers.ChoiceField(
+        choices=FixtureCompetition.FORMAT_TYPE_CHOICES, default='ezone_custom'
+    )
     team_ids = serializers.ListField(child=serializers.IntegerField(), min_length=2)
     matches_per_pair = serializers.IntegerField(min_value=1, max_value=10, default=1)
     match_days = serializers.IntegerField(min_value=1, max_value=60, default=1)
     semifinal_qualifiers = serializers.IntegerField(min_value=2, max_value=16, default=4)
 
+class CustomTournamentSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = CustomTournament
+        fields = [
+            'id', 'title', 'format_type', 'status', 'completion_percentage',
+            'winner_name', 'runner_up_name', 'manager', 'created_at',
+            'winner_banner_image', 'runner_up_logo', 'winner_description_1',
+            'winner_description_2', 'winner_quote', 'champions_squad'
+        ]
+        read_only_fields = ['manager', 'created_at']
+
+class FixtureCompetitionStatusUpdateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = FixtureCompetition
+        fields = ['status', 'format_type', 'winner', 'runner_up']
 
 class AuctionListSerializer(serializers.ModelSerializer):
     total_teams = serializers.SerializerMethodField()
