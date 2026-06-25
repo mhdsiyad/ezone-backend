@@ -1156,16 +1156,16 @@ def _fixture_player_stats(competition, request=None):
         stat['matches'] = len(match_goals)
         stat['goals_against'] = sum(match_goals.values())
 
-    # Count total distinct completed league match days for the 25% minimum rule
+    # Count total distinct completed league match days for the 50% minimum rule
     completed_league_match_days = FixtureMatch.objects.filter(
         competition=competition,
         stage='league',
         status='completed',
     ).values_list('match_day', flat=True).distinct().count()
 
-    # A player must have played in at least 25% of completed league match days
-    # Use ceil so partial fractions always round UP (e.g. 25% of 5 days = 1.25 → needs 2 matches)
-    min_matches_required = max(1, math.ceil(completed_league_match_days * 0.25))
+    # A player must have played in at least 50% of completed league match days
+    # Use ceil so partial fractions always round UP (e.g. 50% of 5 days = 2.5 → needs 3 matches)
+    min_matches_required = max(1, math.ceil(completed_league_match_days * 0.50))
 
     goal_stats = sorted(
         stats.values(),
@@ -1174,7 +1174,7 @@ def _fixture_player_stats(competition, request=None):
     )
     # Defence: Include all players who played >= 1 match.
     # Sort order: 
-    # 1. Qualified first (0) vs unqualified (1) based on the 25% rule
+    # 1. Qualified first (0) vs unqualified (1) based on the 50% rule
     # 2. Total goals conceded (ascending)
     # 3. Matches played (descending)
     defence_stats = sorted(
