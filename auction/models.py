@@ -181,6 +181,8 @@ class FixtureCompetition(models.Model):
     matches_per_pair = models.PositiveIntegerField(default=1)
     match_days = models.PositiveIntegerField(default=1)
     semifinal_qualifiers = models.PositiveIntegerField(default=4)
+    teams_per_group_advance = models.PositiveIntegerField(default=2)
+    is_default = models.BooleanField(default=False)
     status = models.CharField(
         max_length=20, choices=STATUS_CHOICES, default='upcoming'
     )
@@ -195,6 +197,22 @@ class FixtureCompetition(models.Model):
 
     class Meta:
         ordering = ['-created_at']
+
+
+class FixtureGroup(models.Model):
+    competition = models.ForeignKey(
+        FixtureCompetition, on_delete=models.CASCADE, related_name='groups'
+    )
+    name = models.CharField(max_length=50)
+    order = models.PositiveIntegerField(default=0)
+    teams = models.ManyToManyField(Team, related_name='fixture_groups', blank=True)
+
+    class Meta:
+        ordering = ['order', 'id']
+
+    def __str__(self):
+        return f"{self.name} ({self.competition.title})"
+
 
 class CustomTournament(models.Model):
     title = models.CharField(max_length=200)
@@ -251,6 +269,8 @@ class FixtureRosterEntry(models.Model):
 class FixtureMatch(models.Model):
     STAGE_CHOICES = [
         ('league', 'League'),
+        ('round_of_32', 'Round of 32'),
+        ('round_of_16', 'Round of 16'),
         ('quarter', 'Quarter Final'),
         ('semi', 'Semi Final'),
         ('final', 'Final'),
@@ -262,6 +282,9 @@ class FixtureMatch(models.Model):
 
     competition = models.ForeignKey(
         FixtureCompetition, on_delete=models.CASCADE, related_name='matches'
+    )
+    group = models.ForeignKey(
+        FixtureGroup, null=True, blank=True, on_delete=models.SET_NULL, related_name='matches'
     )
     home_team = models.ForeignKey(
         Team, on_delete=models.CASCADE, related_name='home_fixture_matches'

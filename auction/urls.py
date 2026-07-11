@@ -48,5 +48,7 @@ urlpatterns = [
     path('auctions/<str:auction_id>/fixtures/<int:fixture_id>/roster/<int:entry_id>/', views.FixtureRosterEntryDetailView.as_view(), name='fixture-roster-detail'),
     path('auctions/<str:auction_id>/fixtures/<int:fixture_id>/matches/<int:match_id>/', views.FixtureMatchUpdateView.as_view(), name='fixture-match-update'),
     path('auctions/<str:auction_id>/fixtures/<int:fixture_id>/knockout/', views.FixtureKnockoutCreateView.as_view(), name='fixture-knockout-create'),
+    path('auctions/<str:auction_id>/fixtures/<int:fixture_id>/knockout/seed/', views.FixtureKnockoutSeedProposalView.as_view(), name='fixture-knockout-seed'),
     path('auctions/<str:auction_id>/fixtures/<int:fixture_id>/stage/<str:stage>/', views.FixtureStageDeleteView.as_view(), name='fixture-stage-delete'),
+    path('auctions/<str:auction_id>/fixtures/<int:fixture_id>/groups/<int:group_id>/reassign/', views.FixtureGroupReassignView.as_view(), name='fixture-group-reassign'),
 ]

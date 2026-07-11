@@ -9,8 +9,8 @@ class SeasonAdmin(admin.ModelAdmin):
 
 @admin.register(Team)
 class TeamAdmin(admin.ModelAdmin):
-    list_display = ('team_name', 'leader_name', 'season', 'leader_contact_number', 'is_verified', 'created_at')
-    list_filter = ('season', 'is_verified', 'created_at')
+    list_display = ('team_name', 'leader_name', 'season', 'leader_contact_number', 'is_verified', 'payment_status', 'contacted', 'created_at')
+    list_filter = ('season', 'is_verified', 'payment_status', 'contacted', 'created_at')
     search_fields = ('team_name', 'leader_name', 'leader_contact_number')
     actions = ['verify_teams', 'unverify_teams']
 

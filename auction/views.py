@@ -2,6 +2,8 @@ import asyncio
 import csv
 import io
 import math
+import random
+import string
 import threading
 
 from django.contrib.auth import get_user_model
@@ -19,6 +21,7 @@ from .models import (
     AuctionTeam,
     Bid,
     FixtureCompetition,
+    FixtureGroup,
     FixtureLineup,
     FixtureMatch,
     FixtureRosterEntry,
@@ -39,6 +42,7 @@ from .serializers import (
     FixtureCompetitionDetailSerializer,
     FixtureCompetitionListSerializer,
     FixtureCompetitionStatusUpdateSerializer,
+    FixtureGroupSerializer,
     FixtureMatchSerializer,
     FixtureRosterEntrySerializer,
     FixtureSeasonSerializer,
@@ -1023,8 +1027,8 @@ class ResultListView(APIView):
 
 # ── Fixture Views ─────────────────────────────────────────────────────────────
 
-def _fixture_table(competition, request=None):
-    teams = list(competition.teams.all())
+def _fixture_table(competition, request=None, teams=None, matches_qs=None):
+    teams = list(teams) if teams is not None else list(competition.teams.all())
     rows = {
         team.id: {
             'team_id': team.id,
@@ -1043,9 +1047,9 @@ def _fixture_table(competition, request=None):
         for team in teams
     }
 
-    matches = FixtureMatch.objects.filter(
-        competition=competition, status='completed'
-    ).select_related('home_team', 'away_team').prefetch_related('lineups')
+    if matches_qs is None:
+        matches_qs = FixtureMatch.objects.filter(competition=competition, status='completed')
+    matches = matches_qs.select_related('home_team', 'away_team').prefetch_related('lineups')
     for match in matches:
         home = rows.get(match.home_team_id)
         away = rows.get(match.away_team_id)
@@ -1095,6 +1099,22 @@ def _fixture_table(competition, request=None):
         ),
         reverse=True,
     )
+
+
+def _fixture_group_tables(competition, request=None):
+    groups = competition.groups.prefetch_related('teams').order_by('order', 'id')
+    result = []
+    for group in groups:
+        group_teams = list(group.teams.all())
+        matches_qs = FixtureMatch.objects.filter(
+            competition=competition, status='completed', group=group
+        )
+        result.append({
+            'group_id': group.id,
+            'group_name': group.name,
+            'table': _fixture_table(competition, request, teams=group_teams, matches_qs=matches_qs),
+        })
+    return result
 
 
 def _fixture_player_stats(competition, request=None):
@@ -1193,7 +1213,7 @@ def _fixture_player_stats(competition, request=None):
     return goal_stats, defence_stats, stats_meta
 
 
-def _generate_league_matches(competition, teams):
+def _generate_league_matches(competition, teams, group=None):
     if not teams:
         return
 
@@ -1246,6 +1266,7 @@ def _generate_league_matches(competition, teams):
         for home, away in round_matches:
             fixture_matches.append(FixtureMatch(
                 competition=competition,
+                group=group,
                 home_team=home,
                 away_team=away,
                 stage='league',
@@ -1273,6 +1294,29 @@ def _seed_fixture_rosters(competition, teams):
                 'is_active': True,
             }
         )
+
+
+def _group_name(index):
+    """0 -> 'Group A', 25 -> 'Group Z', 26 -> 'Group AA', ..."""
+    letters = string.ascii_uppercase
+    label = ''
+    n = index
+    while True:
+        label = letters[n % 26] + label
+        n = n // 26 - 1
+        if n < 0:
+            break
+    return f'Group {label}'
+
+
+def _split_teams_into_groups(teams, group_count):
+    """Shuffle teams and split them as evenly as possible across group_count buckets."""
+    shuffled = list(teams)
+    random.shuffle(shuffled)
+    buckets = [[] for _ in range(group_count)]
+    for i, team in enumerate(shuffled):
+        buckets[i % group_count].append(team)
+    return buckets
 
 
 class FixtureCompetitionListCreateView(APIView):
@@ -1307,6 +1351,15 @@ class FixtureCompetitionListCreateView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+        group_count = data.get('group_count')
+        is_group_stage = data.get('format_type') == 'group_stage' and group_count
+
+        if is_group_stage and group_count > len(teams) // 2:
+            return Response(
+                {'error': 'Not enough teams to form that many groups (each group needs at least 2 teams).'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
         competition = FixtureCompetition.objects.create(
             auction=auction,
             season_id=data.get('season'),
@@ -1316,10 +1369,21 @@ class FixtureCompetitionListCreateView(APIView):
             matches_per_pair=data['matches_per_pair'],
             match_days=data['match_days'],
             semifinal_qualifiers=data['semifinal_qualifiers'],
+            teams_per_group_advance=data['teams_per_group_advance'],
         )
         competition.teams.set(teams)
         _seed_fixture_rosters(competition, teams)
-        _generate_league_matches(competition, teams)
+
+        if is_group_stage:
+            buckets = _split_teams_into_groups(teams, group_count)
+            for index, group_teams in enumerate(buckets):
+                group = FixtureGroup.objects.create(
+                    competition=competition, name=_group_name(index), order=index
+                )
+                group.teams.set(group_teams)
+                _generate_league_matches(competition, group_teams, group=group)
+        else:
+            _generate_league_matches(competition, teams)
 
         return Response(
             FixtureCompetitionListSerializer(competition).data,
@@ -1368,6 +1432,7 @@ class FixtureCompetitionDetailView(APIView):
             context={
                 'request': request,
                 'table': _fixture_table(competition, request),
+                'group_tables': _fixture_group_tables(competition, request),
                 'goal_stats': goal_stats,
                 'defence_stats': defence_stats,
                 'defence_stats_meta': stats_meta,
@@ -1429,6 +1494,8 @@ class FixtureCompetitionStatusUpdateView(APIView):
             competition, data=request.data, partial=True
         )
         if serializer.is_valid():
+            if serializer.validated_data.get('is_default'):
+                FixtureCompetition.objects.exclude(id=competition.id).update(is_default=False)
             serializer.save()
             return Response(serializer.data)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -1531,13 +1598,17 @@ class FixtureMatchUpdateView(APIView):
         match.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
+KNOCKOUT_STAGES = {'round_of_32', 'round_of_16', 'quarter', 'semi', 'final'}
+STAGES_ORDER = ['league', 'round_of_32', 'round_of_16', 'quarter', 'semi', 'final']
+
+
 class FixtureStageDeleteView(APIView):
-    """Delete all matches belonging to a specific stage (quarter/semi/final)."""
+    """Delete all matches belonging to a specific knockout stage."""
     permission_classes = [IsManagerPermission]
 
     def delete(self, request, auction_id, fixture_id, stage):
-        if stage not in {'quarter', 'semi', 'final'}:
-            return Response({'error': 'stage must be quarter, semi or final.'}, status=400)
+        if stage not in KNOCKOUT_STAGES:
+            return Response({'error': f'stage must be one of {sorted(KNOCKOUT_STAGES)}.'}, status=400)
         try:
             competition = FixtureCompetition.objects.get(
                 id=fixture_id,
@@ -1564,8 +1635,8 @@ class FixtureKnockoutCreateView(APIView):
             return Response(status=status.HTTP_404_NOT_FOUND)
 
         stage = request.data.get('stage')
-        if stage not in {'quarter', 'semi', 'final'}:
-            return Response({'error': 'stage must be quarter, semi or final.'}, status=400)
+        if stage not in KNOCKOUT_STAGES:
+            return Response({'error': f'stage must be one of {sorted(KNOCKOUT_STAGES)}.'}, status=400)
 
         matches_per_pair = max(1, int(request.data.get('matches_per_pair') or 1))
 
@@ -1605,9 +1676,8 @@ class FixtureKnockoutCreateView(APIView):
         FixtureMatch.objects.filter(competition=competition, stage=stage).delete()
 
         # Calculate starting match day based on previous stages
-        stages_order = ['league', 'quarter', 'semi', 'final']
-        current_index = stages_order.index(stage)
-        prev_stages = stages_order[:current_index]
+        current_index = STAGES_ORDER.index(stage)
+        prev_stages = STAGES_ORDER[:current_index]
         
         last_match = FixtureMatch.objects.filter(
             competition=competition, 
@@ -1633,6 +1703,97 @@ class FixtureKnockoutCreateView(APIView):
 
         return Response(FixtureMatchSerializer(created, many=True).data, status=201)
 
+
+class FixtureGroupReassignView(APIView):
+    """Move a team into a different group, regenerating that group's league matches."""
+    permission_classes = [IsManagerPermission]
+
+    def patch(self, request, auction_id, fixture_id, group_id):
+        try:
+            competition = FixtureCompetition.objects.get(
+                id=fixture_id, auction_id=auction_id, auction__manager=request.user
+            )
+            target_group = FixtureGroup.objects.get(id=group_id, competition=competition)
+        except (FixtureCompetition.DoesNotExist, FixtureGroup.DoesNotExist):
+            return Response(status=status.HTTP_404_NOT_FOUND)
+
+        team_id = request.data.get('team_id')
+        try:
+            team = Team.objects.get(id=team_id, fixture_competitions=competition)
+        except Team.DoesNotExist:
+            return Response({'error': 'Team is not part of this tournament.'}, status=400)
+
+        affected_groups = list(FixtureGroup.objects.filter(competition=competition, teams=team))
+        for group in affected_groups:
+            group.teams.remove(team)
+        if target_group not in affected_groups:
+            affected_groups.append(target_group)
+        target_group.teams.add(team)
+
+        for group in affected_groups:
+            FixtureMatch.objects.filter(competition=competition, stage='league', group=group).delete()
+            _generate_league_matches(competition, list(group.teams.all()), group=group)
+
+        return Response(FixtureGroupSerializer(FixtureGroup.objects.filter(competition=competition).order_by('order', 'id'), many=True).data)
+
+
+class FixtureKnockoutSeedProposalView(APIView):
+    """Propose a randomized cross-group knockout bracket from current group standings.
+
+    Does not create any matches — the manager reviews/edits the returned pairs and
+    submits them through the existing FixtureKnockoutCreateView to commit.
+    """
+    permission_classes = [IsManagerPermission]
+
+    STAGE_BY_QUALIFIER_COUNT = {2: 'final', 4: 'semi', 8: 'quarter', 16: 'round_of_16', 32: 'round_of_32'}
+
+    def post(self, request, auction_id, fixture_id):
+        try:
+            competition = FixtureCompetition.objects.get(
+                id=fixture_id, auction_id=auction_id, auction__manager=request.user
+            )
+        except FixtureCompetition.DoesNotExist:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+
+        groups = list(competition.groups.all().order_by('order', 'id'))
+        if not groups:
+            return Response({'error': 'This tournament has no groups.'}, status=400)
+
+        advance = competition.teams_per_group_advance
+        group_tables = _fixture_group_tables(competition, request)
+
+        qualifiers = []
+        for entry in group_tables:
+            for row in entry['table'][:advance]:
+                qualifiers.append({
+                    'id': row['team_id'],
+                    'name': row['team_name'],
+                    'group_id': entry['group_id'],
+                    'group_name': entry['group_name'],
+                })
+
+        stage = self.STAGE_BY_QUALIFIER_COUNT.get(len(qualifiers))
+        if not stage:
+            return Response({
+                'error': (
+                    f'{len(qualifiers)} qualifying teams do not form a valid bracket size. '
+                    f'Total groups × teams-per-group-advance must equal 2, 4, 8, 16 or 32.'
+                )
+            }, status=400)
+
+        # Cross-group random pairing: shuffle, then greedily avoid pairing two teams
+        # from the same group whenever an alternative is available.
+        remaining = list(qualifiers)
+        random.shuffle(remaining)
+        pairs = []
+        while remaining:
+            a = remaining.pop(0)
+            candidates = [i for i, b in enumerate(remaining) if b['group_id'] != a['group_id']]
+            idx = random.choice(candidates) if candidates else 0
+            b = remaining.pop(idx)
+            pairs.append({'home': a, 'away': b})
+
+        return Response({'stage': stage, 'pairs': pairs})
 
 
 class FixtureRosterEntryListCreateView(APIView):
@@ -1800,6 +1961,7 @@ class PublicFixtureCompetitionDetailView(APIView):
             context={
                 'request': request,
                 'table': _fixture_table(competition, request),
+                'group_tables': _fixture_group_tables(competition, request),
                 'goal_stats': goal_stats,
                 'defence_stats': defence_stats,
                 'defence_stats_meta': stats_meta,
@@ -1832,6 +1994,7 @@ class PublicLatestFixtureCompetitionView(APIView):
             context={
                 'request': request,
                 'table': _fixture_table(competition, request),
+                'group_tables': _fixture_group_tables(competition, request),
                 'goal_stats': goal_stats,
                 'defence_stats': defence_stats,
                 'defence_stats_meta': stats_meta,
