@@ -53,6 +53,8 @@ def get_current_team(profile):
 
 
 def get_match_stats(profile):
+    """Career matches/wins/win-rate based on the profile's own personal pairing
+    results, not the team's overall aggregate outcome for the match."""
     from auction.models import FixtureLineup
 
     lineups = FixtureLineup.objects.filter(
@@ -67,11 +69,9 @@ def get_match_stats(profile):
         if match.id in matches_seen:
             continue
         is_home = lineup.home_roster_entry_id is not None and lineup.home_roster_entry.profile_id == profile.id
-        won = (
-            (is_home and match.home_score > match.away_score)
-            or (not is_home and match.away_score > match.home_score)
-        )
-        matches_seen[match.id] = won
+        goals = lineup.home_goals if is_home else lineup.away_goals
+        conceded = lineup.away_goals if is_home else lineup.home_goals
+        matches_seen[match.id] = goals > conceded
 
     matches_played = len(matches_seen)
     wins = sum(1 for won in matches_seen.values() if won)
@@ -136,7 +136,8 @@ def get_recent_matches(profile, limit=20):
 
 def _roster_entry_stats(entry):
     """Goals scored, matches won, and matches drawn by a single roster entry (one
-    tournament stint)."""
+    tournament stint) — based on the entry's own personal pairing results, not the
+    team's overall aggregate outcome for that match."""
     from auction.models import FixtureLineup
 
     lineups = FixtureLineup.objects.filter(
@@ -150,15 +151,17 @@ def _roster_entry_stats(entry):
     for lineup in lineups:
         match = lineup.match
         is_home = lineup.home_roster_entry_id == entry.id
-        goals += lineup.home_goals if is_home else lineup.away_goals
+        entry_goals = lineup.home_goals if is_home else lineup.away_goals
+        entry_conceded = lineup.away_goals if is_home else lineup.home_goals
+        goals += entry_goals
         if match.id in matches_seen:
             continue
-        if match.home_score == match.away_score:
-            outcome = 'draw'
-        elif (is_home and match.home_score > match.away_score) or (not is_home and match.away_score > match.home_score):
+        if entry_goals > entry_conceded:
             outcome = 'win'
-        else:
+        elif entry_goals < entry_conceded:
             outcome = 'loss'
+        else:
+            outcome = 'draw'
         matches_seen[match.id] = outcome
 
     wins = sum(1 for outcome in matches_seen.values() if outcome == 'win')
