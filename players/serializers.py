@@ -15,9 +15,17 @@ class PlayerApplySerializer(serializers.ModelSerializer):
 
 
 class PublicPlayerListSerializer(serializers.ModelSerializer):
+    rating = serializers.SerializerMethodField()
+
     class Meta:
         model = PlayerProfile
         fields = ['player_id', 'name', 'efootball_id', 'instagram_id', 'position', 'photo', 'rating']
+
+    def get_rating(self, obj):
+        # Computed live, same as the detail page — the cached DB column can lag
+        # behind an ongoing tournament's results until the next recompute trigger.
+        from .rating_engine import get_career_points, rating_from_points
+        return rating_from_points(get_career_points(obj))
 
 
 class PublicPlayerDetailSerializer(serializers.ModelSerializer):
