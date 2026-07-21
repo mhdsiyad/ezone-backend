@@ -253,6 +253,10 @@ class FixtureRosterEntry(models.Model):
         Player, null=True, blank=True, on_delete=models.SET_NULL,
         related_name='fixture_roster_entries'
     )
+    profile = models.ForeignKey(
+        'players.PlayerProfile', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='roster_entries'
+    )
     name = models.CharField(max_length=100)
     is_custom = models.BooleanField(default=False)
     is_active = models.BooleanField(default=True)

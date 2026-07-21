@@ -33,6 +33,7 @@ INSTALLED_APPS = [
     # Local
     'auction',
     'teams',
+    'players',
 ]
 
 MIDDLEWARE = [

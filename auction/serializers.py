@@ -124,11 +124,14 @@ class FixtureSeasonSerializer(serializers.ModelSerializer):
 class FixtureRosterEntrySerializer(serializers.ModelSerializer):
     team_name = serializers.CharField(source='team.name', read_only=True)
     player_level = serializers.CharField(source='player.level', read_only=True)
+    profile_player_id = serializers.CharField(source='profile.player_id', read_only=True)
+    profile_name = serializers.CharField(source='profile.name', read_only=True)
 
     class Meta:
         model = FixtureRosterEntry
         fields = [
             'id', 'team', 'team_name', 'player', 'player_level',
+            'profile', 'profile_player_id', 'profile_name',
             'name', 'is_custom', 'is_active', 'created_at'
         ]
 
