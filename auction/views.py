@@ -1403,6 +1403,11 @@ class FixtureMatchUpdateView(APIView):
         if match.competition.status == 'completed':
             from players.rating_engine import handle_competition_completed
             handle_competition_completed(match.competition)
+        else:
+            # Ongoing tournaments: keep player ratings in sync with results as they
+            # come in, without waiting for the whole competition to be marked complete.
+            from players.rating_engine import recompute_competition_profiles
+            recompute_competition_profiles(match.competition)
         return Response(FixtureMatchSerializer(match).data)
 
     def delete(self, request, auction_id, fixture_id, match_id):
@@ -1659,9 +1664,13 @@ class FixtureRosterEntryListCreateView(APIView):
             is_active=True,
         )
 
-        if profile_id and competition.status == 'completed':
-            from players.rating_engine import handle_competition_completed
-            handle_competition_completed(competition)
+        if profile_id:
+            if competition.status == 'completed':
+                from players.rating_engine import handle_competition_completed
+                handle_competition_completed(competition)
+            else:
+                from players.rating_engine import recompute_competition_profiles
+                recompute_competition_profiles(competition)
 
         return Response(FixtureRosterEntrySerializer(entry).data, status=201)
 
@@ -1696,13 +1705,20 @@ class FixtureRosterEntryDetailView(APIView):
         if update_fields:
             entry.save(update_fields=update_fields)
 
-        if profile_changed and entry.competition.status == 'completed':
+        if profile_changed:
             from players.models import PlayerProfile
-            from players.rating_engine import handle_competition_completed, recompute_rating
+            from players.rating_engine import (
+                handle_competition_completed,
+                recompute_competition_profiles,
+                recompute_rating,
+            )
 
-            # Re-scans stats for this competition: reassigns badges to whoever is now
-            # linked, and recomputes rating for every profile still linked to it.
-            handle_competition_completed(entry.competition)
+            if entry.competition.status == 'completed':
+                # Re-scans stats for this competition: reassigns badges to whoever is
+                # now linked, and recomputes rating for every profile still linked to it.
+                handle_competition_completed(entry.competition)
+            else:
+                recompute_competition_profiles(entry.competition)
 
             # The profile that just lost this link won't be revisited above (it may no
             # longer be linked to this competition at all) — refresh it explicitly so

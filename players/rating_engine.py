@@ -6,12 +6,17 @@ from .models import BASE_RATING, PlayerBadge, PlayerProfile
 # level; there is no separate "level" concept. Tunable here without a migration.
 XP_PER_GOAL = 50
 XP_PER_WIN = 100
+XP_PER_DRAW = 50
 XP_PER_BADGE = 250  # Golden Ball / Golden Glove
 
 # Tournament final-standing bonus, ranked 1st (top of table) downward.
 # Positions past the list taper to a flat floor.
 TABLE_POSITION_XP = [250, 200, 180, 160, 150, 140, 130, 120, 110, 100, 90, 80, 70, 60]
 TABLE_POSITION_XP_FLOOR = 50
+
+# A tournament's XP counts while matches are being played (ongoing) and once
+# it's finished (completed). Placement bonus and badges only finalize on completion.
+LIVE_XP_STATUSES = ('ongoing', 'completed')
 
 
 def get_table_position_xp(position):
@@ -74,8 +79,64 @@ def get_match_stats(profile):
     return {'matches_played': matches_played, 'wins': wins, 'win_rate': win_rate}
 
 
+def get_recent_matches(profile, limit=20):
+    """The profile's own individual pairings, most recent first — the player's
+    personal scoreline against the specific opponent they faced, not the team's
+    overall aggregate result for that match day."""
+    from auction.models import FixtureLineup
+
+    lineups = FixtureLineup.objects.filter(
+        match__status='completed',
+    ).filter(
+        Q(home_roster_entry__profile=profile) | Q(away_roster_entry__profile=profile)
+    ).select_related(
+        'match', 'match__competition', 'match__home_team', 'match__away_team',
+        'home_roster_entry', 'away_roster_entry',
+    ).order_by('-match__played_at', '-match__id', '-id')[:limit]
+
+    rows = []
+    for lineup in lineups:
+        match = lineup.match
+        is_home = lineup.home_roster_entry_id is not None and lineup.home_roster_entry.profile_id == profile.id
+
+        team = match.home_team if is_home else match.away_team
+        opponent_entry = lineup.away_roster_entry if is_home else lineup.home_roster_entry
+        opponent_team = match.away_team if is_home else match.home_team
+        opponent_name = opponent_entry.name if opponent_entry else opponent_team.name
+
+        goals = lineup.home_goals if is_home else lineup.away_goals
+        conceded = lineup.away_goals if is_home else lineup.home_goals
+        if goals > conceded:
+            result = 'win'
+        elif goals < conceded:
+            result = 'loss'
+        else:
+            result = 'draw'
+
+        rows.append({
+            'match_id': match.id,
+            'competition_id': match.competition_id,
+            'competition_title': match.competition.title,
+            'team_name': team.name,
+            'opponent_name': opponent_name,
+            'team_score': goals,
+            'opponent_score': conceded,
+            'result': result,
+            'goals': goals,
+            'played_at': match.played_at,
+        })
+
+    for row in rows:
+        row['goal_xp'] = row['goals'] * XP_PER_GOAL
+        row['win_xp'] = XP_PER_WIN if row['result'] == 'win' else 0
+        row['draw_xp'] = XP_PER_DRAW if row['result'] == 'draw' else 0
+        row['total_xp'] = row['goal_xp'] + row['win_xp'] + row['draw_xp']
+    return rows
+
+
 def _roster_entry_stats(entry):
-    """Goals scored and matches won by a single roster entry (one tournament stint)."""
+    """Goals scored, matches won, and matches drawn by a single roster entry (one
+    tournament stint)."""
     from auction.models import FixtureLineup
 
     lineups = FixtureLineup.objects.filter(
@@ -92,11 +153,17 @@ def _roster_entry_stats(entry):
         goals += lineup.home_goals if is_home else lineup.away_goals
         if match.id in matches_seen:
             continue
-        won = (is_home and match.home_score > match.away_score) or (not is_home and match.away_score > match.home_score)
-        matches_seen[match.id] = won
+        if match.home_score == match.away_score:
+            outcome = 'draw'
+        elif (is_home and match.home_score > match.away_score) or (not is_home and match.away_score > match.home_score):
+            outcome = 'win'
+        else:
+            outcome = 'loss'
+        matches_seen[match.id] = outcome
 
-    wins = sum(1 for won in matches_seen.values() if won)
-    return goals, wins
+    wins = sum(1 for outcome in matches_seen.values() if outcome == 'win')
+    draws = sum(1 for outcome in matches_seen.values() if outcome == 'draw')
+    return goals, wins, draws
 
 
 def _team_table_position(competition, team_id):
@@ -117,41 +184,62 @@ def _team_table_position(competition, team_id):
 
 
 def get_tournament_xp_breakdown(profile):
-    """Per-tournament XP breakdown for every completed competition the profile played in."""
+    """Per-tournament XP breakdown for every ongoing or completed competition the
+    profile played in. Placement bonus and badge XP only count once a tournament
+    is fully completed — standings and awards aren't final before then."""
     from auction.models import FixtureRosterEntry
 
     entries = FixtureRosterEntry.objects.filter(
-        profile=profile, competition__status='completed'
-    ).select_related('competition', 'team')
+        profile=profile, competition__status__in=LIVE_XP_STATUSES
+    ).select_related('competition', 'team').order_by('-created_at')
 
     badge_xp_by_competition = {}
     for badge in PlayerBadge.objects.filter(profile=profile):
         badge_xp_by_competition[badge.competition_id] = badge_xp_by_competition.get(badge.competition_id, 0) + XP_PER_BADGE
 
-    breakdown = []
-    seen_competitions = set()
+    # A profile can have more than one roster entry in the same competition (e.g.
+    # swapped teams mid-tournament) — aggregate every entry's stats together rather
+    # than only counting whichever one is returned first.
+    entries_by_competition = {}
     for entry in entries:
-        if entry.competition_id in seen_competitions:
-            continue
-        seen_competitions.add(entry.competition_id)
+        entries_by_competition.setdefault(entry.competition_id, []).append(entry)
 
-        goals, wins = _roster_entry_stats(entry)
-        position = _team_table_position(entry.competition, entry.team_id)
+    breakdown = []
+    for competition_id, comp_entries in entries_by_competition.items():
+        competition = comp_entries[0].competition
+        is_final = competition.status == 'completed'
+
+        goals = 0
+        wins = 0
+        draws = 0
+        for entry in comp_entries:
+            entry_goals, entry_wins, entry_draws = _roster_entry_stats(entry)
+            goals += entry_goals
+            wins += entry_wins
+            draws += entry_draws
+
+        # Most recent entry represents the team/standing shown for this tournament.
+        latest_entry = comp_entries[0]
+        position = _team_table_position(competition, latest_entry.team_id) if is_final else None
         placement_xp = get_table_position_xp(position) if position else 0
-        badge_xp = badge_xp_by_competition.get(entry.competition_id, 0)
+        badge_xp = badge_xp_by_competition.get(competition_id, 0) if is_final else 0
 
         goal_xp = goals * XP_PER_GOAL
         win_xp = wins * XP_PER_WIN
-        total_xp = goal_xp + win_xp + placement_xp + badge_xp
+        draw_xp = draws * XP_PER_DRAW
+        total_xp = goal_xp + win_xp + draw_xp + placement_xp + badge_xp
 
         breakdown.append({
-            'competition_id': entry.competition_id,
-            'title': entry.competition.title,
-            'team_name': entry.team.name,
+            'competition_id': competition_id,
+            'title': competition.title,
+            'team_name': latest_entry.team.name,
+            'status': competition.status,
             'goals': goals,
             'goal_xp': goal_xp,
             'wins': wins,
             'win_xp': win_xp,
+            'draws': draws,
+            'draw_xp': draw_xp,
             'table_position': position,
             'placement_xp': placement_xp,
             'badge_xp': badge_xp,
@@ -212,18 +300,31 @@ def recompute_rating(profile):
     return rating
 
 
+def recompute_competition_profiles(competition):
+    """Recompute rating for every profile currently linked to `competition`'s roster,
+    regardless of the competition's status. Safe to call after any result changes."""
+    from auction.models import FixtureRosterEntry
+
+    linked_profile_ids = FixtureRosterEntry.objects.filter(
+        competition=competition, profile__isnull=False
+    ).values_list('profile_id', flat=True).distinct()
+
+    for profile in PlayerProfile.objects.filter(id__in=list(linked_profile_ids)):
+        recompute_rating(profile)
+
+
 def _award_badge(competition, badge_type, stat_rows):
+    """Awards the badge to the actual top-ranked performer only — if they aren't a
+    linked verified profile, nobody is credited (no falling back to the runner-up)."""
     from auction.models import FixtureRosterEntry
 
     winner_profile = None
-    for row in stat_rows:
-        roster_entry_id = row.get('roster_entry_id')
-        if not roster_entry_id:
-            continue
-        entry = FixtureRosterEntry.objects.filter(id=roster_entry_id).select_related('profile').first()
-        if entry and entry.profile_id:
-            winner_profile = entry.profile
-            break
+    if stat_rows:
+        roster_entry_id = stat_rows[0].get('roster_entry_id')
+        if roster_entry_id:
+            entry = FixtureRosterEntry.objects.filter(id=roster_entry_id).select_related('profile').first()
+            if entry and entry.profile_id:
+                winner_profile = entry.profile
 
     if winner_profile:
         PlayerBadge.objects.update_or_create(
@@ -242,7 +343,6 @@ def handle_competition_completed(competition):
     if competition.status != 'completed':
         return
 
-    from auction.models import FixtureRosterEntry
     from auction.stats import _fixture_player_stats
 
     goal_stats, defence_stats, _meta = _fixture_player_stats(competition)
@@ -250,9 +350,4 @@ def handle_competition_completed(competition):
     _award_badge(competition, 'golden_ball', goal_stats)
     _award_badge(competition, 'golden_glove', defence_stats)
 
-    linked_profile_ids = FixtureRosterEntry.objects.filter(
-        competition=competition, profile__isnull=False
-    ).values_list('profile_id', flat=True).distinct()
-
-    for profile in PlayerProfile.objects.filter(id__in=list(linked_profile_ids)):
-        recompute_rating(profile)
+    recompute_competition_profiles(competition)

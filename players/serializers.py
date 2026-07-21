@@ -21,8 +21,10 @@ class PublicPlayerListSerializer(serializers.ModelSerializer):
 
 
 class PublicPlayerDetailSerializer(serializers.ModelSerializer):
+    rating = serializers.SerializerMethodField()
     total_goals = serializers.SerializerMethodField()
     match_history = serializers.SerializerMethodField()
+    recent_matches = serializers.SerializerMethodField()
     badges = serializers.SerializerMethodField()
     current_team = serializers.SerializerMethodField()
     matches_played = serializers.SerializerMethodField()
@@ -36,8 +38,8 @@ class PublicPlayerDetailSerializer(serializers.ModelSerializer):
         model = PlayerProfile
         fields = [
             'player_id', 'name', 'efootball_id', 'instagram_id', 'position', 'country', 'photo', 'rating',
-            'total_goals', 'match_history', 'badges', 'current_team', 'matches_played', 'wins', 'win_rate',
-            'rating_xp_into_level', 'rating_xp_for_next_level', 'career_xp',
+            'total_goals', 'match_history', 'recent_matches', 'badges', 'current_team', 'matches_played', 'wins',
+            'win_rate', 'rating_xp_into_level', 'rating_xp_for_next_level', 'career_xp',
         ]
 
     def _xp_breakdown(self, obj):
@@ -48,6 +50,13 @@ class PublicPlayerDetailSerializer(serializers.ModelSerializer):
 
     def get_career_xp(self, obj):
         return sum(entry['total_xp'] for entry in self._xp_breakdown(obj))
+
+    def get_rating(self, obj):
+        # Computed live from current stats rather than the cached DB column, so an
+        # in-progress tournament's results show up immediately without waiting for
+        # a background recompute trigger to fire.
+        from .rating_engine import rating_from_points
+        return rating_from_points(self.get_career_xp(obj))
 
     def _rating_progress(self, obj):
         if not hasattr(obj, '_rating_progress_cache'):
@@ -86,6 +95,10 @@ class PublicPlayerDetailSerializer(serializers.ModelSerializer):
 
     def get_match_history(self, obj):
         return self._xp_breakdown(obj)
+
+    def get_recent_matches(self, obj):
+        from .rating_engine import get_recent_matches
+        return get_recent_matches(obj)
 
     def get_badges(self, obj):
         from .rating_engine import XP_PER_BADGE
