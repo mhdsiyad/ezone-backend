@@ -3,6 +3,7 @@ from rest_framework import generics, status
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
+from rest_framework.views import APIView
 
 from auction.permissions import IsManagerPermission
 
@@ -68,6 +69,28 @@ class PublicPlayerDetailView(generics.RetrieveAPIView):
     permission_classes = [AllowAny]
     lookup_field = 'player_id'
     queryset = PlayerProfile.objects.filter(is_verified=True)
+
+
+class PublicPlayerMatchesView(APIView):
+    """Paginated match history for the 'load more' control on the profile page —
+    the detail endpoint only ships the first page inline."""
+    permission_classes = [AllowAny]
+
+    def get(self, request, player_id):
+        try:
+            profile = PlayerProfile.objects.get(player_id=player_id, is_verified=True)
+        except PlayerProfile.DoesNotExist:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+
+        from .rating_engine import get_recent_matches
+
+        try:
+            limit = min(50, max(1, int(request.query_params.get('limit', 20))))
+            offset = max(0, int(request.query_params.get('offset', 0)))
+        except ValueError:
+            return Response({'error': 'limit and offset must be integers.'}, status=400)
+
+        return Response(get_recent_matches(profile, limit=limit, offset=offset))
 
 
 class ManagerPlayerPagination(PageNumberPagination):

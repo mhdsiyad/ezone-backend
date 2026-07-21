@@ -14,6 +14,27 @@ XP_PER_BADGE = 250  # Golden Ball / Golden Glove
 TABLE_POSITION_XP = [250, 200, 180, 160, 150, 140, 130, 120, 110, 100, 90, 80, 70, 60]
 TABLE_POSITION_XP_FLOOR = 50
 
+# Knockout-stage placement bonus — takes priority over the plain table position
+# once a team has actually appeared in the bracket, since league rank alone
+# doesn't reflect who actually won the semi-final / final.
+KNOCKOUT_STAGE_ORDER = ['round_of_32', 'round_of_16', 'quarter', 'semi', 'final']
+KNOCKOUT_ACHIEVEMENT_XP = {
+    'champion': 250,
+    'runner_up': 200,
+    'semi': 180,
+    'quarter': 150,
+    'round_of_16': 120,
+    'round_of_32': 100,
+}
+KNOCKOUT_ACHIEVEMENT_LABEL = {
+    'champion': 'Champion',
+    'runner_up': 'Runner-up',
+    'semi': 'Semifinalist',
+    'quarter': 'Quarterfinalist',
+    'round_of_16': 'Round of 16',
+    'round_of_32': 'Round of 32',
+}
+
 # A tournament's XP counts while matches are being played (ongoing) and once
 # it's finished (completed). Placement bonus and badges only finalize on completion.
 LIVE_XP_STATUSES = ('ongoing', 'completed')
@@ -79,20 +100,23 @@ def get_match_stats(profile):
     return {'matches_played': matches_played, 'wins': wins, 'win_rate': win_rate}
 
 
-def get_recent_matches(profile, limit=20):
+def get_recent_matches(profile, limit=20, offset=0):
     """The profile's own individual pairings, most recent first — the player's
     personal scoreline against the specific opponent they faced, not the team's
     overall aggregate result for that match day."""
     from auction.models import FixtureLineup
 
-    lineups = FixtureLineup.objects.filter(
+    base_qs = FixtureLineup.objects.filter(
         match__status='completed',
     ).filter(
         Q(home_roster_entry__profile=profile) | Q(away_roster_entry__profile=profile)
     ).select_related(
         'match', 'match__competition', 'match__home_team', 'match__away_team',
         'home_roster_entry', 'away_roster_entry',
-    ).order_by('-match__played_at', '-match__id', '-id')[:limit]
+    ).order_by('-match__played_at', '-match__id', '-id')
+
+    total = base_qs.count()
+    lineups = base_qs[offset:offset + limit]
 
     rows = []
     for lineup in lineups:
@@ -131,7 +155,7 @@ def get_recent_matches(profile, limit=20):
         row['win_xp'] = XP_PER_WIN if row['result'] == 'win' else 0
         row['draw_xp'] = XP_PER_DRAW if row['result'] == 'draw' else 0
         row['total_xp'] = row['goal_xp'] + row['win_xp'] + row['draw_xp']
-    return rows
+    return {'results': rows, 'total': total, 'has_more': offset + len(rows) < total}
 
 
 def _roster_entry_stats(entry):
@@ -167,6 +191,34 @@ def _roster_entry_stats(entry):
     wins = sum(1 for outcome in matches_seen.values() if outcome == 'win')
     draws = sum(1 for outcome in matches_seen.values() if outcome == 'draw')
     return goals, wins, draws
+
+
+def _team_knockout_achievement(competition, team_id):
+    """The team's furthest knockout result — (xp, label) — or None if they never
+    appeared in a knockout-stage match (e.g. eliminated before playoffs began, or
+    the tournament has no bracket)."""
+    from auction.models import FixtureMatch
+
+    matches = FixtureMatch.objects.filter(
+        competition=competition, status='completed',
+    ).exclude(stage='league').filter(Q(home_team_id=team_id) | Q(away_team_id=team_id))
+
+    furthest_stage = None
+    won_final = False
+    for match in matches:
+        if match.stage not in KNOCKOUT_STAGE_ORDER:
+            continue
+        if furthest_stage is None or KNOCKOUT_STAGE_ORDER.index(match.stage) > KNOCKOUT_STAGE_ORDER.index(furthest_stage):
+            furthest_stage = match.stage
+        if match.stage == 'final':
+            is_home = match.home_team_id == team_id
+            if (is_home and match.home_score > match.away_score) or (not is_home and match.away_score > match.home_score):
+                won_final = True
+
+    if furthest_stage is None:
+        return None
+    key = 'champion' if (furthest_stage == 'final' and won_final) else 'runner_up' if furthest_stage == 'final' else furthest_stage
+    return KNOCKOUT_ACHIEVEMENT_XP[key], KNOCKOUT_ACHIEVEMENT_LABEL[key]
 
 
 def _team_table_position(competition, team_id):
@@ -224,7 +276,17 @@ def get_tournament_xp_breakdown(profile):
         # Most recent entry represents the team/standing shown for this tournament.
         latest_entry = comp_entries[0]
         position = _team_table_position(competition, latest_entry.team_id) if is_final else None
+        placement_label = f'#{position} Table' if position else None
         placement_xp = get_table_position_xp(position) if position else 0
+
+        if is_final:
+            # A team's actual bracket result (won/lost the final, semi, etc.)
+            # outranks its raw league-table seed — that's what actually decided
+            # the tournament, not just who topped the group stage.
+            knockout_result = _team_knockout_achievement(competition, latest_entry.team_id)
+            if knockout_result:
+                placement_xp, placement_label = knockout_result
+
         badge_xp = badge_xp_by_competition.get(competition_id, 0) if is_final else 0
 
         goal_xp = goals * XP_PER_GOAL
@@ -244,6 +306,7 @@ def get_tournament_xp_breakdown(profile):
             'draws': draws,
             'draw_xp': draw_xp,
             'table_position': position,
+            'placement_label': placement_label,
             'placement_xp': placement_xp,
             'badge_xp': badge_xp,
             'total_xp': total_xp,

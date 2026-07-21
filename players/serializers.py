@@ -106,7 +106,7 @@ class PublicPlayerDetailSerializer(serializers.ModelSerializer):
 
     def get_recent_matches(self, obj):
         from .rating_engine import get_recent_matches
-        return get_recent_matches(obj)
+        return get_recent_matches(obj, limit=20, offset=0)
 
     def get_badges(self, obj):
         from .rating_engine import XP_PER_BADGE
