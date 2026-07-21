@@ -7,7 +7,7 @@ from .models import BASE_RATING, PlayerBadge, PlayerProfile
 XP_PER_GOAL = 50
 XP_PER_WIN = 100
 XP_PER_DRAW = 50
-XP_PER_BADGE = 250  # Golden Ball / Golden Glove
+XP_PER_BADGE = 1000  # Golden Ball / Golden Glove
 
 # Tournament final-standing bonus, ranked 1st (top of table) downward.
 # Positions past the list taper to a flat floor.
