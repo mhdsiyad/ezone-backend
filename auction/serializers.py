@@ -287,6 +287,37 @@ class FixtureCompetitionCreateSerializer(serializers.Serializer):
     group_count = serializers.IntegerField(min_value=2, max_value=16, required=False, allow_null=True)
     teams_per_group_advance = serializers.IntegerField(min_value=1, max_value=8, default=2)
 
+
+class QuickTeamSerializer(serializers.Serializer):
+    name = serializers.CharField(max_length=100)
+    captain = serializers.CharField(max_length=150, required=False, allow_blank=True)
+
+
+class FixtureCompetitionQuickCreateSerializer(serializers.Serializer):
+    """Like FixtureCompetitionCreateSerializer, but for tournaments set up without
+    a pre-existing auction — teams are entered by name/captain right here instead
+    of picked from an auction's roster via team_ids."""
+    title = serializers.CharField(max_length=200)
+    season = serializers.IntegerField(required=False, allow_null=True)
+    match_type = serializers.ChoiceField(choices=FixtureCompetition.MATCH_TYPE_CHOICES)
+    format_type = serializers.ChoiceField(
+        choices=FixtureCompetition.FORMAT_TYPE_CHOICES, default='ezone_custom'
+    )
+    teams = QuickTeamSerializer(many=True)
+    matches_per_pair = serializers.IntegerField(min_value=1, max_value=10, default=1)
+    match_days = serializers.IntegerField(min_value=1, max_value=60, default=1)
+    semifinal_qualifiers = serializers.IntegerField(min_value=2, max_value=16, default=4)
+    group_count = serializers.IntegerField(min_value=2, max_value=16, required=False, allow_null=True)
+    teams_per_group_advance = serializers.IntegerField(min_value=1, max_value=8, default=2)
+
+    def validate_teams(self, value):
+        if len(value) < 2:
+            raise serializers.ValidationError('At least 2 teams are required.')
+        names = [t['name'].strip().lower() for t in value]
+        if len(names) != len(set(names)):
+            raise serializers.ValidationError('Team names must be unique.')
+        return value
+
 class CustomTournamentSerializer(serializers.ModelSerializer):
     class Meta:
         model = CustomTournament
@@ -310,7 +341,7 @@ class AuctionListSerializer(serializers.ModelSerializer):
         model = Auction
         fields = ['id', 'title', 'status', 'total_teams', 'time_limit',
                   'base_balance', 'max_players_per_team', 'price_decrement',
-                  'price_lock_enabled', 'custom_bid_disabled', 'created_at']
+                  'price_lock_enabled', 'custom_bid_disabled', 'is_fixture_only', 'created_at']
 
     def get_total_teams(self, obj):
         return obj.teams.count()

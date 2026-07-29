@@ -62,6 +62,10 @@ class Auction(models.Model):
         default=False,
         help_text='When on, captains can only use the quick-bid buttons — the free-type bid amount input is hidden.'
     )
+    is_fixture_only = models.BooleanField(
+        default=False,
+        help_text='Auto-created container for teams entered directly at fixture-creation time (no live auction ever runs). Hidden from the manager\'s auctions dashboard.'
+    )
     current_player = models.ForeignKey(
         'Player', null=True, blank=True,
         on_delete=models.SET_NULL, related_name='current_in_auction'

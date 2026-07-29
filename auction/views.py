@@ -41,6 +41,7 @@ from .serializers import (
     FixtureCompetitionCreateSerializer,
     FixtureCompetitionDetailSerializer,
     FixtureCompetitionListSerializer,
+    FixtureCompetitionQuickCreateSerializer,
     FixtureCompetitionStatusUpdateSerializer,
     FixtureGroupSerializer,
     FixtureMatchSerializer,
@@ -1215,6 +1216,55 @@ def _split_teams_into_groups(teams, group_count):
     return buckets
 
 
+class FixtureCreationError(Exception):
+    """Raised by _create_fixture_competition on validation failure — callers
+    turn it into an HTTP 400 with the message as the error."""
+    pass
+
+
+def _create_fixture_competition(auction, teams, data):
+    """Shared by FixtureCompetitionListCreateView and FixtureQuickCreateView:
+    creates the FixtureCompetition, seeds rosters, and generates whatever
+    initial matches the format needs (league schedule, per-group schedules,
+    or nothing yet for a standalone knockout bracket).
+    """
+    group_count = data.get('group_count')
+    is_group_stage = data.get('format_type') == 'group_stage' and group_count
+    is_pure_knockout = data.get('format_type') == 'knockout'
+
+    if is_group_stage and group_count > len(teams) // 2:
+        raise FixtureCreationError(
+            'Not enough teams to form that many groups (each group needs at least 2 teams).'
+        )
+
+    competition = FixtureCompetition.objects.create(
+        auction=auction,
+        season_id=data.get('season'),
+        title=data['title'],
+        match_type=data['match_type'],
+        format_type=data.get('format_type', 'ezone_custom'),
+        matches_per_pair=data['matches_per_pair'],
+        match_days=data['match_days'],
+        semifinal_qualifiers=data['semifinal_qualifiers'],
+        teams_per_group_advance=data['teams_per_group_advance'],
+    )
+    competition.teams.set(teams)
+    _seed_fixture_rosters(competition, teams)
+
+    if is_group_stage:
+        buckets = _split_teams_into_groups(teams, group_count)
+        for index, group_teams in enumerate(buckets):
+            group = FixtureGroup.objects.create(
+                competition=competition, name=_group_name(index), order=index
+            )
+            group.teams.set(group_teams)
+            _generate_league_matches(competition, group_teams, group=group)
+    elif not is_pure_knockout:
+        _generate_league_matches(competition, teams)
+
+    return competition
+
+
 class FixtureCompetitionListCreateView(APIView):
     permission_classes = [IsManagerPermission]
 
@@ -1247,39 +1297,53 @@ class FixtureCompetitionListCreateView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        group_count = data.get('group_count')
-        is_group_stage = data.get('format_type') == 'group_stage' and group_count
+        try:
+            competition = _create_fixture_competition(auction, teams, data)
+        except FixtureCreationError as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
-        if is_group_stage and group_count > len(teams) // 2:
-            return Response(
-                {'error': 'Not enough teams to form that many groups (each group needs at least 2 teams).'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        competition = FixtureCompetition.objects.create(
-            auction=auction,
-            season_id=data.get('season'),
-            title=data['title'],
-            match_type=data['match_type'],
-            format_type=data.get('format_type', 'ezone_custom'),
-            matches_per_pair=data['matches_per_pair'],
-            match_days=data['match_days'],
-            semifinal_qualifiers=data['semifinal_qualifiers'],
-            teams_per_group_advance=data['teams_per_group_advance'],
+        return Response(
+            FixtureCompetitionListSerializer(competition).data,
+            status=status.HTTP_201_CREATED
         )
-        competition.teams.set(teams)
-        _seed_fixture_rosters(competition, teams)
 
-        if is_group_stage:
-            buckets = _split_teams_into_groups(teams, group_count)
-            for index, group_teams in enumerate(buckets):
-                group = FixtureGroup.objects.create(
-                    competition=competition, name=_group_name(index), order=index
-                )
-                group.teams.set(group_teams)
-                _generate_league_matches(competition, group_teams, group=group)
-        else:
-            _generate_league_matches(competition, teams)
+
+class FixtureQuickCreateView(APIView):
+    """Creates a tournament without a pre-existing auction: teams are entered
+    by name/captain right here. Under the hood this still creates a normal
+    Auction + Teams + AuctionTeams (everything else — matches, rosters, stats —
+    is keyed off auction_id), it's just flagged is_fixture_only=True so it
+    stays out of the manager's auctions dashboard and no live bidding ever runs
+    against it.
+    """
+    permission_classes = [IsManagerPermission]
+
+    def post(self, request):
+        serializer = FixtureCompetitionQuickCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        auction = Auction.objects.create(
+            manager=request.user,
+            title=data['title'],
+            is_fixture_only=True,
+        )
+
+        teams = []
+        for team_data in data['teams']:
+            team = Team.objects.create(
+                name=team_data['name'].strip(),
+                captain_username=team_data.get('captain', '').strip(),
+                created_by=request.user,
+            )
+            AuctionTeam.objects.create(auction=auction, team=team, balance=auction.base_balance)
+            teams.append(team)
+
+        try:
+            competition = _create_fixture_competition(auction, teams, data)
+        except FixtureCreationError as e:
+            auction.delete()  # roll back the shadow auction + its teams (cascades)
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
         return Response(
             FixtureCompetitionListSerializer(competition).data,
