@@ -50,6 +50,18 @@ class Auction(models.Model):
     base_balance = models.PositiveIntegerField(default=10000)
     max_players_per_team = models.PositiveIntegerField(default=15)
     time_limit = models.PositiveIntegerField(default=60)
+    price_decrement = models.PositiveIntegerField(
+        default=5,
+        help_text='Amount subtracted from a player\'s base price each time they go unsold/skipped.'
+    )
+    price_lock_enabled = models.BooleanField(
+        default=False,
+        help_text='When on, a team cannot bid more than what leaves enough balance to still afford its remaining required roster slots.'
+    )
+    custom_bid_disabled = models.BooleanField(
+        default=False,
+        help_text='When on, captains can only use the quick-bid buttons — the free-type bid amount input is hidden.'
+    )
     current_player = models.ForeignKey(
         'Player', null=True, blank=True,
         on_delete=models.SET_NULL, related_name='current_in_auction'
@@ -80,6 +92,7 @@ class Player(models.Model):
     LEVEL_CHOICES = [
         ('bigtime', 'Bigtime'),
         ('epic', 'Epic'),
+        ('showtime', 'Showtime'),
         ('highlight', 'Highlight'),
         ('base', 'Base'),
     ]

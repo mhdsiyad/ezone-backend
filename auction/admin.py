@@ -41,8 +41,8 @@ class PlayerInline(admin.TabularInline):
 
 @admin.register(Auction)
 class AuctionAdmin(admin.ModelAdmin):
-    list_display = ['id', 'title', 'status', 'manager', 'created_at']
-    list_filter = ['status']
+    list_display = ['id', 'title', 'status', 'manager', 'price_lock_enabled', 'custom_bid_disabled', 'created_at']
+    list_filter = ['status', 'price_lock_enabled', 'custom_bid_disabled']
     search_fields = ['title', 'id']
     inlines = [AuctionTeamInline, PlayerInline]
     readonly_fields = ['created_at', 'started_at', 'ended_at']

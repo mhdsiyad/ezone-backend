@@ -78,6 +78,28 @@ def _cancel_timer(auction_id):
             event.set()
 
 
+def price_locked_max_bid(auction, auction_team, won_count):
+    """Price Value Lock: the highest a team may bid on the current player while still
+    being able to afford its remaining required roster slots at (at least) the
+    cheapest still-unsold base price. Returns None when the lock doesn't apply
+    (feature off, or this can be the team's last required player).
+    """
+    if not auction.price_lock_enabled:
+        return None
+
+    slots_after_this = auction.max_players_per_team - won_count - 1
+    if slots_after_this <= 0:
+        return None
+
+    from .models import Player
+    min_base_price = Player.objects.filter(
+        auction=auction, sold=False
+    ).exclude(id=auction.current_player_id).order_by('base_price').values_list('base_price', flat=True).first() or 0
+
+    reserve = slots_after_this * min_base_price
+    return auction_team.balance - reserve
+
+
 # Registry to track active countdown tasks per auction
 _active_countdowns = {}  # auction_id -> threading.Event
 _active_countdowns_lock = threading.Lock()
@@ -392,7 +414,7 @@ class PlayerImportView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        valid_levels = {'bigtime', 'epic', 'highlight', 'base'}
+        valid_levels = {'bigtime', 'epic', 'showtime', 'highlight', 'base'}
         players_created = []
 
         # Clear existing players if re-importing
@@ -441,6 +463,57 @@ class PlayerImportView(APIView):
             },
             status=status.HTTP_201_CREATED
         )
+
+
+class PlayerPriceUpdateView(APIView):
+    """Lets a manager manually adjust an unsold player's base price mid-auction —
+    e.g. to break a deadlock where remaining teams' balances have fallen below
+    what Price Value Lock requires them to reserve, faster than waiting on the
+    automatic per-skip price_decrement.
+    """
+    permission_classes = [IsManagerPermission]
+
+    def patch(self, request, auction_id, player_id):
+        try:
+            auction = Auction.objects.get(id=auction_id, manager=request.user)
+        except Auction.DoesNotExist:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+
+        try:
+            player = Player.objects.get(id=player_id, auction=auction)
+        except Player.DoesNotExist:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+
+        if player.sold:
+            return Response(
+                {'error': 'Cannot change the price of a player that has already been sold.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            base_price = int(request.data.get('base_price'))
+        except (TypeError, ValueError):
+            return Response({'error': 'base_price must be an integer.'}, status=status.HTTP_400_BAD_REQUEST)
+        if base_price < 0:
+            return Response({'error': 'base_price cannot be negative.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        player.base_price = base_price
+        player.save(update_fields=['base_price'])
+
+        group_name = f'auction_{auction_id}'
+        players_data = PlayerSerializer(Player.objects.filter(auction=auction), many=True).data
+        get_channel_layer_broadcast(group_name, {
+            'type': 'roster_update',
+            'players': players_data,
+        })
+        if auction.current_player_id == player.id:
+            get_channel_layer_broadcast(group_name, {
+                'type': 'player_update',
+                'player': PlayerSerializer(player).data,
+                'timer': auction.current_timer,
+            })
+
+        return Response(PlayerSerializer(player).data)
 
 
 # ── Auction Control View ──────────────────────────────────────────────────────
@@ -578,7 +651,7 @@ class AuctionControlView(APIView):
         if current:
             # Push current player to the end of the line
             current.skipped = True
-            current.base_price = max(0, current.base_price - 5)
+            current.base_price = max(0, current.base_price - auction.price_decrement)
             max_order = Player.objects.filter(
                 auction=auction
             ).order_by('-order').values_list('order', flat=True).first() or 0
@@ -685,7 +758,7 @@ async def _handle_timer_expired(auction_id, channel_layer, group_name):
             # No bids → mark UNSOLD, push to end of queue
             player = auction.current_player
             player.skipped = True
-            player.base_price = max(0, player.base_price - 5)
+            player.base_price = max(0, player.base_price - auction.price_decrement)
 
             # Move to end by updating order
             max_order = Player.objects.filter(
@@ -776,7 +849,7 @@ async def _run_countdown(auction_id, stop_event):
             # No bid — mark UNSOLD and advance to back of queue
             player = auction.current_player
             player.skipped = True
-            player.base_price = max(0, player.base_price - 5)
+            player.base_price = max(0, player.base_price - auction.price_decrement)
             max_order = Player.objects.filter(
                 auction=auction
             ).order_by('-order').values_list('order', flat=True).first() or 0
@@ -960,6 +1033,15 @@ class BidListCreateView(APIView):
         if won_count >= auction.max_players_per_team:
             return Response(
                 {'error': f'Roster full. You already have {won_count}/{auction.max_players_per_team} players.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Price Value Lock: keep enough balance in reserve to still afford the
+        # rest of the required roster once this bid wins.
+        max_locked_bid = price_locked_max_bid(auction, auction_team, won_count)
+        if max_locked_bid is not None and amount > max_locked_bid:
+            return Response(
+                {'error': f'Price Lock: max bid is ${max_locked_bid} — you must reserve enough balance for your remaining roster slots.'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 

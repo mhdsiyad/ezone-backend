@@ -21,7 +21,8 @@ class AuctionConsumer(AsyncWebsocketConsumer):
 
     Server → Client events:
         auction_state, player_update, bid_update, timer_update, auction_status,
-        bid_countdown, teams_update, auction_end, spectator_count, teams_online
+        bid_countdown, teams_update, auction_end, spectator_count, teams_online,
+        roster_update
 
     Client → Server events:
         place_bid, ping
@@ -244,7 +245,7 @@ class AuctionConsumer(AsyncWebsocketConsumer):
 
     @database_sync_to_async
     def save_bid(self, user, amount):
-        from .models import Auction, AuctionTeam, Bid, Player
+        from .models import Auction, AuctionTeam, Bid, Player, SoldResult
         from .serializers import BidSerializer
 
         try:
@@ -282,6 +283,12 @@ class AuctionConsumer(AsyncWebsocketConsumer):
 
         if amount > auction_team.balance:
             return {'error': f'Insufficient balance. You have ${auction_team.balance}.'}
+
+        from .views import price_locked_max_bid
+        won_count = SoldResult.objects.filter(auction=auction, team=team).count()
+        max_locked_bid = price_locked_max_bid(auction, auction_team, won_count)
+        if max_locked_bid is not None and amount > max_locked_bid:
+            return {'error': f'Price Lock: max bid is ${max_locked_bid} — you must reserve enough balance for your remaining roster slots.'}
 
         # Save bid
         bid = Bid.objects.create(
@@ -367,4 +374,10 @@ class AuctionConsumer(AsyncWebsocketConsumer):
         await self.send(text_data=json.dumps({
             'type': 'teams_online',
             'team_ids': event['team_ids'],
+        }))
+
+    async def roster_update(self, event):
+        await self.send(text_data=json.dumps({
+            'type': 'roster_update',
+            'players': event['players'],
         }))

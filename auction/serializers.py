@@ -309,7 +309,8 @@ class AuctionListSerializer(serializers.ModelSerializer):
     class Meta:
         model = Auction
         fields = ['id', 'title', 'status', 'total_teams', 'time_limit',
-                  'base_balance', 'max_players_per_team', 'created_at']
+                  'base_balance', 'max_players_per_team', 'price_decrement',
+                  'price_lock_enabled', 'custom_bid_disabled', 'created_at']
 
     def get_total_teams(self, obj):
         return obj.teams.count()
@@ -327,7 +328,8 @@ class AuctionDetailSerializer(serializers.ModelSerializer):
         model = Auction
         fields = [
             'id', 'title', 'status', 'time_limit', 'base_balance',
-            'max_players_per_team', 'current_timer', 'current_player',
+            'max_players_per_team', 'price_decrement', 'price_lock_enabled',
+            'custom_bid_disabled', 'current_timer', 'current_player',
             'teams', 'highest_bid', 'recent_bids',
             'total_players', 'sold_players', 'created_at'
         ]
@@ -362,4 +364,7 @@ class AuctionCreateSerializer(serializers.Serializer):
     base_balance = serializers.IntegerField(default=10000)
     max_players_per_team = serializers.IntegerField(default=15)
     time_limit = serializers.IntegerField(default=60)
+    price_decrement = serializers.IntegerField(default=5, min_value=0)
+    price_lock_enabled = serializers.BooleanField(default=False)
+    custom_bid_disabled = serializers.BooleanField(default=False)
     team_ids = serializers.ListField(child=serializers.IntegerField(), min_length=1)

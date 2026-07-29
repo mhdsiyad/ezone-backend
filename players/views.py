@@ -43,10 +43,45 @@ SORT_FIELDS = {
     '-name': '-name',
 }
 
+# Mirrors ezone-hub/src/lib/playerTiers.ts — keep the two in sync.
+TIER_RATING_RANGES = {
+    'base': (62, 75),
+    'highlight': (76, 89),
+    'showtime': (90, 98),
+    'epic': (99, 105),
+    'bigtime': (106, None),
+}
+
+
+class PublicPlayerPagination(PageNumberPagination):
+    """Page-based pagination with a richer metadata block than DRF's default
+    {count, next, previous} — the frontend renders page numbers and an
+    'X-Y of N' range directly from this."""
+    page_size = 15
+    page_size_query_param = 'page_size'
+    max_page_size = 50
+
+    def get_paginated_response(self, data):
+        paginator = self.page.paginator
+        return Response({
+            'results': data,
+            'pagination': {
+                'total_items': paginator.count,
+                'total_pages': paginator.num_pages,
+                'per_page': paginator.per_page,
+                'current_page': self.page.number,
+                'from_item': self.page.start_index(),
+                'to_item': self.page.end_index(),
+                'has_next': self.page.has_next(),
+                'has_previous': self.page.has_previous(),
+            },
+        })
+
 
 class PublicPlayerListView(generics.ListAPIView):
     serializer_class = PublicPlayerListSerializer
     permission_classes = [AllowAny]
+    pagination_class = PublicPlayerPagination
 
     def get_queryset(self):
         qs = PlayerProfile.objects.filter(is_verified=True)
@@ -59,6 +94,13 @@ class PublicPlayerListView(generics.ListAPIView):
                 | Q(player_id__icontains=search)
                 | Q(efootball_id__icontains=search)
             )
+
+        tier_range = TIER_RATING_RANGES.get(params.get('tier'))
+        if tier_range:
+            min_rating, max_rating = tier_range
+            qs = qs.filter(rating__gte=min_rating)
+            if max_rating is not None:
+                qs = qs.filter(rating__lte=max_rating)
 
         sort = SORT_FIELDS.get(params.get('sort'), '-rating')
         return qs.order_by(sort)

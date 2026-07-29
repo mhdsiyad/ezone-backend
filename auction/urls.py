@@ -18,6 +18,7 @@ urlpatterns = [
     # Players
     path('auctions/<str:auction_id>/players/', views.PlayerListView.as_view(), name='player-list'),
     path('auctions/<str:auction_id>/players/import/', views.PlayerImportView.as_view(), name='player-import'),
+    path('auctions/<str:auction_id>/players/<int:player_id>/', views.PlayerPriceUpdateView.as_view(), name='player-price-update'),
 
     # Auction Control
     path('auctions/<str:auction_id>/control/', views.AuctionControlView.as_view(), name='auction-control'),
