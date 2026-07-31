@@ -148,7 +148,8 @@ class FixtureLineupSerializer(serializers.ModelSerializer):
             'id', 'home_player', 'home_player_name', 'home_roster_entry',
             'home_roster_entry_name', 'away_player', 'away_player_name',
             'away_roster_entry', 'away_roster_entry_name', 'home_goals',
-            'away_goals', 'order'
+            'away_goals', 'penalty_shootout', 'home_penalty', 'away_penalty',
+            'order'
         ]
 
 

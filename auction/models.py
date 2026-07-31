@@ -351,10 +351,25 @@ class FixtureLineup(models.Model):
     )
     home_goals = models.PositiveIntegerField(default=0)
     away_goals = models.PositiveIntegerField(default=0)
+    penalty_shootout = models.BooleanField(
+        default=False,
+        help_text='This player set finished level and was decided by a penalty shootout.'
+    )
+    home_penalty = models.PositiveIntegerField(default=0)
+    away_penalty = models.PositiveIntegerField(default=0)
     order = models.PositiveIntegerField(default=0)
 
     class Meta:
         ordering = ['order', 'id']
+
+    @property
+    def winner_side(self):
+        """'home', 'away', or None — the shootout settles a level set."""
+        if self.home_goals != self.away_goals:
+            return 'home' if self.home_goals > self.away_goals else 'away'
+        if self.penalty_shootout and self.home_penalty != self.away_penalty:
+            return 'home' if self.home_penalty > self.away_penalty else 'away'
+        return None
 
     def __str__(self):
         home = self.home_player.name if self.home_player else 'TBD'

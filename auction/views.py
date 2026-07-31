@@ -1503,6 +1503,14 @@ class FixtureMatchUpdateView(APIView):
                 home_goals = max(0, int(row.get('home_goals') or 0))
                 away_goals = max(0, int(row.get('away_goals') or 0))
 
+                # A shootout belongs to the individual player set, and only counts
+                # when that set finished level and the shootout produced a winner.
+                home_pen = max(0, int(row.get('home_penalty') or 0))
+                away_pen = max(0, int(row.get('away_penalty') or 0))
+                shootout = bool(row.get('penalty_shootout'))
+                if home_goals != away_goals or home_pen == away_pen:
+                    shootout, home_pen, away_pen = False, 0, 0
+
                 FixtureLineup.objects.create(
                     match=match,
                     home_roster_entry=home_entry,
@@ -1511,23 +1519,19 @@ class FixtureMatchUpdateView(APIView):
                     away_player_id=away_player_id or None,
                     home_goals=home_goals,
                     away_goals=away_goals,
+                    penalty_shootout=shootout,
+                    home_penalty=home_pen,
+                    away_penalty=away_pen,
                     order=index,
                 )
                 home_total += home_goals
                 away_total += away_goals
 
             if match.competition.match_type == 'team':
-                home_wins = 0
-                away_wins = 0
-                for row in lineups:
-                    h_g = int(row.get('home_goals') or 0)
-                    a_g = int(row.get('away_goals') or 0)
-                    if h_g > a_g:
-                        home_wins += 1
-                    elif a_g > h_g:
-                        away_wins += 1
-                match.home_score = home_wins
-                match.away_score = away_wins
+                # Sets won — a set decided on penalties counts for its shootout winner.
+                sides = [row.winner_side for row in match.lineups.all()]
+                match.home_score = sides.count('home')
+                match.away_score = sides.count('away')
             else:
                 match.home_score = home_total
                 match.away_score = away_total
@@ -1536,6 +1540,7 @@ class FixtureMatchUpdateView(APIView):
             match.home_score = max(0, int(request.data.get('home_score') or 0))
         if 'away_score' in request.data:
             match.away_score = max(0, int(request.data.get('away_score') or 0))
+
         if request.data.get('status') in {'upcoming', 'completed'}:
             match.status = request.data['status']
         if match.status == 'completed' and not match.played_at:

@@ -48,11 +48,24 @@ def _fixture_table(competition, request=None, teams=None, matches_qs=None):
         away['goals_for'] += away_goals
         away['goals_against'] += home_goals
 
-        if match.home_score > match.away_score:
+        # Penalties are shot per player set, not per fixture. For a team tournament
+        # that is already baked into the sets-won score, so a level score there is a
+        # real draw (the manager adds a decider set to separate them). For single
+        # matches the set's shootout is what breaks a level scoreline. Shootout goals
+        # are never added to goals for/against.
+        penalty_home = penalty_away = 0
+        if match.home_score == match.away_score and competition.match_type != 'team':
+            for l in lineups:
+                if l.penalty_shootout:
+                    penalty_home += l.home_penalty
+                    penalty_away += l.away_penalty
+        penalty_decided = penalty_home != penalty_away
+
+        if match.home_score > match.away_score or (penalty_decided and penalty_home > penalty_away):
             home['won'] += 1
             away['lost'] += 1
             home['points'] += 3
-        elif match.home_score < match.away_score:
+        elif match.home_score < match.away_score or penalty_decided:
             away['won'] += 1
             home['lost'] += 1
             away['points'] += 3
