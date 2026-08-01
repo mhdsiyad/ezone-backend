@@ -19,13 +19,21 @@ def _fixture_table(competition, request=None, teams=None, matches_qs=None):
             'goals_against': 0,
             'goal_difference': 0,
             'points': 0,
+            # Most recent results first, capped at 5 — the classic form guide.
+            'form': [],
         }
         for team in teams
     }
 
     if matches_qs is None:
         matches_qs = FixtureMatch.objects.filter(competition=competition, status='completed')
-    matches = matches_qs.select_related('home_team', 'away_team').prefetch_related('lineups')
+    # Explicit ordering so 'last 5' means the five most recent, regardless of how
+    # the caller built the queryset.
+    matches = (
+        matches_qs.select_related('home_team', 'away_team')
+        .prefetch_related('lineups')
+        .order_by('match_day', 'order', 'id')
+    )
     for match in matches:
         home = rows.get(match.home_team_id)
         away = rows.get(match.away_team_id)
@@ -65,18 +73,26 @@ def _fixture_table(competition, request=None, teams=None, matches_qs=None):
             home['won'] += 1
             away['lost'] += 1
             home['points'] += 3
+            home['form'].append('W')
+            away['form'].append('L')
         elif match.home_score < match.away_score or penalty_decided:
             away['won'] += 1
             home['lost'] += 1
             away['points'] += 3
+            away['form'].append('W')
+            home['form'].append('L')
         else:
             home['drawn'] += 1
             away['drawn'] += 1
             home['points'] += 1
             away['points'] += 1
+            home['form'].append('D')
+            away['form'].append('D')
 
     for row in rows.values():
         row['goal_difference'] = row['goals_for'] - row['goals_against']
+        # Newest first, so the UI reads left-to-right as most-recent-first.
+        row['form'] = row['form'][-5:][::-1]
 
     return sorted(
         rows.values(),

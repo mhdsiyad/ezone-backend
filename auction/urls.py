@@ -9,6 +9,7 @@ urlpatterns = [
 
     # Teams (manager only)
     path('teams/', views.TeamListCreateView.as_view(), name='team-list-create'),
+    path('teams/registry/', views.TeamRegistryView.as_view(), name='team-registry'),
     path('teams/<int:pk>/', views.TeamDetailView.as_view(), name='team-detail'),
 
     # Auctions

@@ -53,6 +53,7 @@ from .serializers import (
     PlayerSerializer,
     SoldResultSerializer,
     TeamCreateSerializer,
+    TeamRegistrySerializer,
     TeamSerializer,
     UserSerializer,
     CustomTournamentSerializer,
@@ -260,6 +261,22 @@ class TeamListCreateView(APIView):
         )
 
 
+class TeamRegistryView(APIView):
+    """Every team with the competitions and auctions it appears in."""
+
+    permission_classes = [IsManagerPermission]
+
+    def get(self, request):
+        teams = (
+            Team.objects.filter(created_by=request.user)
+            .prefetch_related('fixture_competitions', 'auction_set')
+            .order_by('name')
+        )
+        return Response(
+            TeamRegistrySerializer(teams, many=True, context={'request': request}).data
+        )
+
+
 class TeamDetailView(APIView):
     permission_classes = [IsManagerPermission]
 
@@ -287,9 +304,10 @@ class TeamDetailView(APIView):
             username=getattr(team, 'captain_username', None)
         ).first()
         if captain:
-            captain.delete()
+            captain.is_active = False
+            captain.save(update_fields=['is_active'])
 
-        team.delete()
+        team.soft_delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -371,7 +389,7 @@ class AuctionDetailView(APIView):
     def delete(self, request, auction_id):
         try:
             auction = Auction.objects.get(id=auction_id, manager=request.user)
-            auction.delete()
+            auction.soft_delete()
             return Response(status=status.HTTP_204_NO_CONTENT)
         except Auction.DoesNotExist:
             return Response(status=status.HTTP_404_NOT_FOUND)
@@ -1392,7 +1410,9 @@ class FixtureQuickCreateView(APIView):
         try:
             competition = _create_fixture_competition(auction, teams, data)
         except FixtureCreationError as e:
-            auction.delete()  # roll back the shadow auction + its teams (cascades)
+            # Hard delete on purpose: rolls back an auction created seconds ago in
+            # this same request, which no user has seen. Nothing to recover.
+            auction.delete()
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
         return Response(
@@ -1485,7 +1505,11 @@ class FixtureCompetitionDetailView(APIView):
             competition = self.get_object(request, auction_id, fixture_id)
         except FixtureCompetition.DoesNotExist:
             return Response(status=status.HTTP_404_NOT_FOUND)
-        competition.delete()
+        # Flag the children too, so a match or roster entry can't resurface on its
+        # own if it is ever queried without going through the competition.
+        competition.matches.update(is_deleted=True, deleted_at=timezone.now())
+        competition.roster_entries.update(is_deleted=True, deleted_at=timezone.now())
+        competition.soft_delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -1621,7 +1645,7 @@ class FixtureMatchUpdateView(APIView):
             )
         except FixtureMatch.DoesNotExist:
             return Response(status=status.HTTP_404_NOT_FOUND)
-        match.delete()
+        match.soft_delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 KNOCKOUT_STAGES = {'round_of_32', 'round_of_16', 'quarter', 'semi', 'final'}
@@ -1643,7 +1667,9 @@ class FixtureStageDeleteView(APIView):
             )
         except FixtureCompetition.DoesNotExist:
             return Response(status=status.HTTP_404_NOT_FOUND)
-        count, _ = FixtureMatch.objects.filter(competition=competition, stage=stage).delete()
+        count = FixtureMatch.objects.filter(competition=competition, stage=stage).update(
+            is_deleted=True, deleted_at=timezone.now()
+        )
         return Response({'deleted': count})
 
 
@@ -1698,8 +1724,11 @@ class FixtureKnockoutCreateView(APIView):
                 for i in range(0, len(team_ids), 2)
             ]
 
-        # Delete existing matches for this stage before regenerating
-        FixtureMatch.objects.filter(competition=competition, stage=stage).delete()
+        # Regenerating a stage wipes any results already entered against it, so the
+        # old matches are flagged rather than dropped and stay restorable in admin.
+        FixtureMatch.objects.filter(competition=competition, stage=stage).update(
+            is_deleted=True, deleted_at=timezone.now()
+        )
 
         # Calculate starting match day based on previous stages
         current_index = STAGES_ORDER.index(stage)
@@ -1757,7 +1786,9 @@ class FixtureGroupReassignView(APIView):
         target_group.teams.add(team)
 
         for group in affected_groups:
-            FixtureMatch.objects.filter(competition=competition, stage='league', group=group).delete()
+            FixtureMatch.objects.filter(competition=competition, stage='league', group=group).update(
+                is_deleted=True, deleted_at=timezone.now()
+            )
             _generate_league_matches(competition, list(group.teams.all()), group=group)
 
         return Response(FixtureGroupSerializer(FixtureGroup.objects.filter(competition=competition).order_by('order', 'id'), many=True).data)
@@ -1941,7 +1972,7 @@ class FixtureRosterEntryDetailView(APIView):
             )
         except FixtureRosterEntry.DoesNotExist:
             return Response(status=status.HTTP_404_NOT_FOUND)
-        entry.delete()
+        entry.soft_delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -1990,16 +2021,29 @@ class CustomTournamentDetailView(APIView):
         tournament = self.get_object(request, pk)
         if not tournament:
             return Response(status=status.HTTP_404_NOT_FOUND)
-        tournament.delete()
+        tournament.soft_delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class PublicAuctionListView(APIView):
+    """Auctions a spectator can watch.
+
+    This previously filtered on a non-existent `is_active` field, which made it a
+    hard 500. Shadow auctions created behind fixtures are excluded — there is
+    nothing to watch there — and `?status=active` narrows to what is running right
+    now, which is what drives the website's live banner.
+    """
+
     permission_classes = [AllowAny]
 
     def get(self, request):
-        auctions = Auction.objects.filter(is_active=True).order_by('-created_at')
-        return Response(AuctionListSerializer(auctions, many=True).data)
+        auctions = Auction.objects.filter(is_fixture_only=False)
+        status_filter = request.query_params.get('status')
+        if status_filter:
+            auctions = auctions.filter(status=status_filter)
+        return Response(
+            AuctionListSerializer(auctions.order_by('-created_at'), many=True).data
+        )
 
 
 class PublicFixtureCompetitionListView(APIView):

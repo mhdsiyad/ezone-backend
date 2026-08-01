@@ -31,6 +31,43 @@ class TeamSerializer(serializers.ModelSerializer):
         fields = ['id', 'name', 'logo', 'primary_color', 'captain_username', 'created_at']
 
 
+class TeamRegistrySerializer(serializers.ModelSerializer):
+    """Team plus the competitions and auctions it has taken part in.
+
+    Powers the manager's Teams page, where the point is seeing at a glance where a
+    team is actually being used before editing or deleting it.
+    """
+
+    captain_username = serializers.CharField(read_only=True)
+    fixtures = serializers.SerializerMethodField()
+    auctions = serializers.SerializerMethodField()
+    players_won = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Team
+        fields = [
+            'id', 'name', 'logo', 'primary_color', 'captain_username', 'created_at',
+            'fixtures', 'auctions', 'players_won',
+        ]
+
+    def get_fixtures(self, obj):
+        return [
+            {'id': c.id, 'title': c.title, 'status': c.status}
+            for c in obj.fixture_competitions.all()
+        ]
+
+    def get_auctions(self, obj):
+        # Shadow auctions created behind a fixture are not real auctions anyone
+        # attended, so they would only be noise here.
+        return [
+            {'id': a.id, 'title': a.title, 'status': a.status, 'auction_type': a.auction_type}
+            for a in obj.auction_set.filter(is_fixture_only=False)
+        ]
+
+    def get_players_won(self, obj):
+        return SoldResult.objects.filter(team=obj).count()
+
+
 class TeamCreateSerializer(serializers.Serializer):
     name = serializers.CharField(max_length=100)
     username = serializers.CharField(max_length=150)

@@ -1,10 +1,57 @@
 import uuid
 from django.contrib.auth.models import AbstractUser
 from django.db import models
+from django.utils import timezone
 
 
 def generate_auction_id():
     return 'EZN-' + str(uuid.uuid4())[:6].upper()
+
+
+class AliveManager(models.Manager):
+    """Default manager that hides soft-deleted rows.
+
+    Being the *default* manager is the point: every serializer, view and related
+    lookup (`competition.matches.all()`, ...) goes through it, so a deleted record
+    disappears from the API without every call site having to remember to filter.
+    """
+
+    def get_queryset(self):
+        return super().get_queryset().filter(is_deleted=False)
+
+
+class SoftDeleteModel(models.Model):
+    """Deleting a tournament by accident used to be unrecoverable, so the destructive
+    endpoints flag rows instead of removing them. Deleted rows stay in the database
+    and remain visible (and restorable) in the Django admin via `all_objects`.
+    """
+
+    is_deleted = models.BooleanField(
+        default=False, db_index=True,
+        help_text='Hidden from the app but kept in the database. Untick to restore.'
+    )
+    deleted_at = models.DateTimeField(null=True, blank=True)
+
+    objects = AliveManager()
+    all_objects = models.Manager()
+
+    class Meta:
+        abstract = True
+        # Cascades and FK checks must still see deleted rows, otherwise saving a
+        # child of a deleted parent blows up with a spurious integrity error.
+        base_manager_name = 'all_objects'
+
+    def soft_delete(self):
+        if self.is_deleted:
+            return
+        self.is_deleted = True
+        self.deleted_at = timezone.now()
+        self.save(update_fields=['is_deleted', 'deleted_at'])
+
+    def restore(self):
+        self.is_deleted = False
+        self.deleted_at = None
+        self.save(update_fields=['is_deleted', 'deleted_at'])
 
 
 class User(AbstractUser):
@@ -15,7 +62,7 @@ class User(AbstractUser):
         return f"{self.username} ({self.role})"
 
 
-class Team(models.Model):
+class Team(SoftDeleteModel):
     name = models.CharField(max_length=100)
     logo = models.ImageField(upload_to='team_logos/', null=True, blank=True)
     primary_color = models.CharField(max_length=7, default='#1F3322')
@@ -29,7 +76,7 @@ class Team(models.Model):
         return self.name
 
 
-class Auction(models.Model):
+class Auction(SoftDeleteModel):
     STATUS_CHOICES = [
         ('pending', 'Pending'),
         ('active', 'Active'),
@@ -169,19 +216,19 @@ class SoldResult(models.Model):
         return f"{self.player.name} → {self.team.name} @ ${self.sold_price}"
 
 
-class FixtureSeason(models.Model):
+class FixtureSeason(SoftDeleteModel):
     name = models.CharField(max_length=120, unique=True)
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
-    class Meta:
+    class Meta(SoftDeleteModel.Meta):
         ordering = ['-created_at']
 
     def __str__(self):
         return self.name
 
 
-class FixtureCompetition(models.Model):
+class FixtureCompetition(SoftDeleteModel):
     MATCH_TYPE_CHOICES = [
         ('single', 'Single Player Matches'),
         ('team', 'Team Tournament'),
@@ -229,8 +276,11 @@ class FixtureCompetition(models.Model):
     )
     created_at = models.DateTimeField(auto_now_add=True)
 
-    class Meta:
+    class Meta(SoftDeleteModel.Meta):
         ordering = ['-created_at']
+
+    def __str__(self):
+        return self.title
 
 
 class FixtureGroup(models.Model):
@@ -248,7 +298,7 @@ class FixtureGroup(models.Model):
         return f"{self.name} ({self.competition.title})"
 
 
-class CustomTournament(models.Model):
+class CustomTournament(SoftDeleteModel):
     title = models.CharField(max_length=200)
     format_type = models.CharField(max_length=100, blank=True, null=True)
     status = models.CharField(
@@ -267,18 +317,14 @@ class CustomTournament(models.Model):
     winner_quote = models.TextField(blank=True, null=True)
     champions_squad = models.JSONField(default=list, blank=True)
 
-    class Meta:
+    class Meta(SoftDeleteModel.Meta):
         ordering = ['-created_at']
 
     def __str__(self):
         return self.title
 
-    def __str__(self):
-        return f"{self.title} ({self.auction_id})"
 
-
-
-class FixtureRosterEntry(models.Model):
+class FixtureRosterEntry(SoftDeleteModel):
     competition = models.ForeignKey(
         FixtureCompetition, on_delete=models.CASCADE, related_name='roster_entries'
     )
@@ -296,7 +342,7 @@ class FixtureRosterEntry(models.Model):
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
-    class Meta:
+    class Meta(SoftDeleteModel.Meta):
         ordering = ['team__name', 'name']
         unique_together = ('competition', 'team', 'name')
 
@@ -304,7 +350,7 @@ class FixtureRosterEntry(models.Model):
         return f"{self.name} - {self.team.name}"
 
 
-class FixtureMatch(models.Model):
+class FixtureMatch(SoftDeleteModel):
     STAGE_CHOICES = [
         ('league', 'League'),
         ('round_of_32', 'Round of 32'),
@@ -339,7 +385,7 @@ class FixtureMatch(models.Model):
     played_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
-    class Meta:
+    class Meta(SoftDeleteModel.Meta):
         ordering = ['match_day', 'order', 'id']
 
     def __str__(self):
