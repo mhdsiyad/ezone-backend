@@ -49,7 +49,8 @@ class PlayerSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Player
-        fields = ['id', 'name', 'level', 'base_price', 'stats', 'sold', 'skipped', 'order']
+        fields = ['id', 'name', 'level', 'position', 'card_image_url',
+                  'base_price', 'stats', 'sold', 'skipped', 'order']
 
     def get_stats(self, obj):
         return {'win': obj.wins, 'lose': obj.losses, 'goals': obj.goals}
@@ -340,7 +341,7 @@ class AuctionListSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Auction
-        fields = ['id', 'title', 'status', 'total_teams', 'time_limit',
+        fields = ['id', 'title', 'auction_type', 'status', 'total_teams', 'time_limit',
                   'base_balance', 'max_players_per_team', 'price_decrement',
                   'price_lock_enabled', 'custom_bid_disabled', 'is_fixture_only', 'created_at']
 
@@ -359,7 +360,7 @@ class AuctionDetailSerializer(serializers.ModelSerializer):
     class Meta:
         model = Auction
         fields = [
-            'id', 'title', 'status', 'time_limit', 'base_balance',
+            'id', 'title', 'auction_type', 'status', 'time_limit', 'base_balance',
             'max_players_per_team', 'price_decrement', 'price_lock_enabled',
             'custom_bid_disabled', 'current_timer', 'current_player',
             'teams', 'highest_bid', 'recent_bids',
@@ -393,6 +394,9 @@ class AuctionDetailSerializer(serializers.ModelSerializer):
 
 class AuctionCreateSerializer(serializers.Serializer):
     title = serializers.CharField(max_length=200)
+    auction_type = serializers.ChoiceField(
+        choices=Auction.AUCTION_TYPE_CHOICES, default='ezone'
+    )
     base_balance = serializers.IntegerField(default=10000)
     max_players_per_team = serializers.IntegerField(default=15)
     time_limit = serializers.IntegerField(default=60)

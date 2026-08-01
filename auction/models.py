@@ -37,11 +37,20 @@ class Auction(models.Model):
         ('ended', 'Ended'),
     ]
 
+    AUCTION_TYPE_CHOICES = [
+        ('ezone', 'eZone Auction'),
+        ('live', 'Live Auction'),
+    ]
+
     id = models.CharField(
         max_length=20, primary_key=True,
         default=generate_auction_id
     )
     title = models.CharField(max_length=200)
+    auction_type = models.CharField(
+        max_length=20, choices=AUCTION_TYPE_CHOICES, default='ezone',
+        help_text='A Live Auction shows the uploaded participant card artwork instead of the stat-based player card.'
+    )
     manager = models.ForeignKey(
         User, on_delete=models.CASCADE, related_name='managed_auctions'
     )
@@ -106,6 +115,14 @@ class Player(models.Model):
     )
     name = models.CharField(max_length=100)
     level = models.CharField(max_length=20, choices=LEVEL_CHOICES, default='base')
+    position = models.CharField(
+        max_length=10, blank=True, default='',
+        help_text='Playing position (CF, GK, CB...), shown on the Live Auction card.'
+    )
+    card_image_url = models.URLField(
+        max_length=500, blank=True, default='',
+        help_text='Direct image URL for the participant card artwork, normalised on import.'
+    )
     base_price = models.PositiveIntegerField(default=50)
     wins = models.PositiveIntegerField(default=0)
     losses = models.PositiveIntegerField(default=0)

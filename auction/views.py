@@ -5,6 +5,8 @@ import random
 import string
 import threading
 
+import openpyxl
+
 from django.contrib.auth import get_user_model
 from django.utils import timezone
 from channels.layers import get_channel_layer
@@ -15,6 +17,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 
+from .card_links import CardLinkError, normalise_card_link
 from .models import (
     Auction,
     AuctionTeam,
@@ -406,17 +409,43 @@ class PlayerImportView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        try:
-            decoded = file.read().decode('utf-8-sig')  # handles BOM
-            reader = csv.DictReader(io.StringIO(decoded))
-        except Exception as e:
-            return Response(
-                {'error': f'Could not parse file: {str(e)}'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+        # .xlsx is a binary zip, so it has to be read with openpyxl rather than
+        # decoded as text the way a CSV is.
+        raw = file.read()
+        if (file.name or '').lower().endswith(('.xlsx', '.xlsm')):
+            try:
+                workbook = openpyxl.load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
+                sheet = workbook.active
+                rows = sheet.iter_rows(values_only=True)
+                headers = [str(h).strip() if h is not None else '' for h in next(rows)]
+                reader = [
+                    dict(zip(headers, row))
+                    for row in rows
+                    if any(cell is not None and str(cell).strip() for cell in row)
+                ]
+            except StopIteration:
+                return Response(
+                    {'error': 'The spreadsheet is empty.'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            except Exception as e:
+                return Response(
+                    {'error': f'Could not read the spreadsheet: {str(e)}'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        else:
+            try:
+                decoded = raw.decode('utf-8-sig')  # handles BOM
+                reader = csv.DictReader(io.StringIO(decoded))
+            except Exception as e:
+                return Response(
+                    {'error': f'Could not parse file: {str(e)}'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
 
         valid_levels = {'bigtime', 'epic', 'showtime', 'highlight', 'base'}
         players_created = []
+        card_link_warnings = []
 
         # Clear existing players if re-importing
         Player.objects.filter(auction=auction, sold=False).delete()
@@ -433,18 +462,36 @@ class PlayerImportView(APIView):
             try:
                 # Handle potential case mismatches by normalizing keys
                 norm_row = {k.strip().lower(): v for k, v in row.items() if k}
-                
-                name = norm_row.get('player_name', norm_row.get('name', '')).strip()
+
+                def cell(*keys, default=''):
+                    """First non-empty value among these column names, as text."""
+                    for key in keys:
+                        value = norm_row.get(key)
+                        if value is not None and str(value).strip():
+                            return str(value).strip()
+                    return default
+
+                name = cell('player_name', 'name')
                 if not name:
                     continue
 
-                level = norm_row.get('level', 'base').strip().lower()
+                level = cell('level', default='base').lower()
                 if level not in valid_levels:
                     level = 'base'
+
+                # The sheet has gone out with both header spellings; accept either.
+                raw_link = cell('participant_card_link', 'player_card_link', 'card_link')
+                try:
+                    card_image_url = normalise_card_link(raw_link)
+                except CardLinkError as e:
+                    card_image_url = ''
+                    card_link_warnings.append(f'{name}: {e}')
 
                 player = Player.objects.create(
                     auction=auction,
                     name=name,
+                    position=cell('position')[:10],
+                    card_image_url=card_image_url,
                     base_price=safe_int(norm_row.get('base_price', norm_row.get('baseprice', 50)), 50),
                     level=level,
                     wins=safe_int(norm_row.get('wins', norm_row.get('win', 0)), 0),
@@ -461,6 +508,9 @@ class PlayerImportView(APIView):
             {
                 'imported': len(players_created),
                 'players': PlayerSerializer(players_created, many=True).data,
+                # Surfaced in the dashboard so a bad card link is caught at import
+                # time rather than as a blank card mid-auction.
+                'card_link_warnings': card_link_warnings,
             },
             status=status.HTTP_201_CREATED
         )
