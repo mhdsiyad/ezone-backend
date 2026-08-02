@@ -146,3 +146,44 @@ SIMPLE_JWT = {
 
 MEDIA_URL = os.getenv('MEDIA_URL', '/media/')
 MEDIA_ROOT = os.path.join(BASE_DIR, os.getenv('MEDIA_ROOT', 'media'))
+
+# ── Media storage ────────────────────────────────────────────────────────────
+# Off by default so local development keeps writing to MEDIA_ROOT on disk. Set
+# USE_R2=True on the server to serve uploads from Cloudflare R2 instead.
+#
+# Serving media from R2 behind a custom domain also removes two problems that the
+# nginx-served /media/ had: the CORS headers the browser needs to rasterise a player
+# card, and the http:// URLs Django emitted from behind the TLS proxy.
+USE_R2 = os.getenv('USE_R2', 'False').lower() in ('true', '1', 't')
+
+if USE_R2:
+    STORAGES = {
+        'default': {
+            'BACKEND': 'storages.backends.s3.S3Storage',
+            'OPTIONS': {
+                'bucket_name': os.getenv('R2_BUCKET', 'ezone'),
+                'endpoint_url': os.getenv('R2_ENDPOINT'),
+                'access_key': os.getenv('R2_ACCESS_KEY_ID'),
+                'secret_key': os.getenv('R2_SECRET_ACCESS_KEY'),
+                # R2 ignores regions but boto3 insists on one.
+                'region_name': 'auto',
+                # R2 has no ACL support; public access is granted on the bucket.
+                'default_acl': None,
+                # Serve plain public URLs rather than expiring signed ones.
+                'querystring_auth': False,
+                'signature_version': 's3v4',
+                # The public hostname bound to the bucket, e.g.
+                # media.ezone-football.online. Without it URLs point at the private
+                # S3 API endpoint, which browsers cannot read.
+                'custom_domain': os.getenv('R2_PUBLIC_DOMAIN'),
+                # Keep both files if two uploads collide instead of overwriting.
+                'file_overwrite': False,
+            },
+        },
+        'staticfiles': {
+            'BACKEND': 'django.contrib.staticfiles.storage.StaticFilesStorage',
+        },
+    }
+    # Absolute R2 URLs come from the storage backend, so MEDIA_URL is unused for
+    # uploads — kept only for any code that still concatenates it.
+    MEDIA_URL = f"https://{os.getenv('R2_PUBLIC_DOMAIN', '')}/"
