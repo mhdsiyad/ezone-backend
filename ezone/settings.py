@@ -159,7 +159,7 @@ USE_R2 = os.getenv('USE_R2', 'False').lower() in ('true', '1', 't')
 if USE_R2:
     STORAGES = {
         'default': {
-            'BACKEND': 'storages.backends.s3.S3Storage',
+            'BACKEND': 'ezone.storage.R2Storage',
             'OPTIONS': {
                 'bucket_name': os.getenv('R2_BUCKET', 'ezone'),
                 'endpoint_url': os.getenv('R2_ENDPOINT'),

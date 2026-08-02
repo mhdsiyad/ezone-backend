@@ -1,5 +1,7 @@
 import os
 
+from django.conf import settings
+from django.core.files.storage import default_storage
 from django.db import models
 from django.db.models.signals import post_delete
 from django.dispatch import receiver
@@ -76,5 +78,20 @@ class PlayerBadge(models.Model):
 
 @receiver(post_delete, sender=PlayerProfile)
 def delete_player_photo(sender, instance, **kwargs):
-    if instance.photo and os.path.isfile(instance.photo.path):
-        os.remove(instance.photo.path)
+    """Delete the photo file when a player profile is deleted.
+
+    Uses default_storage.delete() so it works for both local filesystem
+    (development) and remote backends like R2/S3 (production). The old
+    os.remove(instance.photo.path) would raise NotImplementedError when
+    the storage backend is S3-based, because path is not supported remotely.
+    """
+    if not instance.photo:
+        return
+    name = instance.photo.name
+    if not name:
+        return
+    try:
+        if default_storage.exists(name):
+            default_storage.delete(name)
+    except Exception:  # noqa: BLE001 - best-effort cleanup, never crash a delete
+        pass
