@@ -140,9 +140,19 @@ class AuctionTeam(models.Model):
     auction = models.ForeignKey(Auction, on_delete=models.CASCADE)
     team = models.ForeignKey(Team, on_delete=models.CASCADE)
     balance = models.PositiveIntegerField()
+    max_players = models.PositiveIntegerField(
+        null=True, blank=True,
+        help_text="Overrides the auction's max players for this team only. "
+                  "Leave blank to use the auction default."
+    )
 
     class Meta:
         unique_together = ('auction', 'team')
+
+    @property
+    def roster_limit(self):
+        """Per-team squad size, falling back to the auction-wide setting."""
+        return self.max_players or self.auction.max_players_per_team
 
     def __str__(self):
         return f"{self.team.name} in {self.auction.title}"

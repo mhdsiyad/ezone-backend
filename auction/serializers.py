@@ -113,7 +113,7 @@ class AuctionTeamSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = AuctionTeam
-        fields = ['id', 'name', 'logo', 'primary_color', 'captain_username', 'balance', 'players_won']
+        fields = ['id', 'name', 'logo', 'primary_color', 'captain_username', 'balance', 'max_players', 'players_won']
 
     def get_players_won(self, obj):
         results = SoldResult.objects.filter(
@@ -441,3 +441,8 @@ class AuctionCreateSerializer(serializers.Serializer):
     price_lock_enabled = serializers.BooleanField(default=False)
     custom_bid_disabled = serializers.BooleanField(default=False)
     team_ids = serializers.ListField(child=serializers.IntegerField(), min_length=1)
+    # Optional per-team overrides: [{team_id, balance?, max_players?}]. Anything
+    # omitted falls back to the auction-wide base_balance / max_players_per_team.
+    team_overrides = serializers.ListField(
+        child=serializers.DictField(), required=False, default=list
+    )

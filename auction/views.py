@@ -92,7 +92,8 @@ def price_locked_max_bid(auction, auction_team, won_count):
     if not auction.price_lock_enabled:
         return None
 
-    slots_after_this = auction.max_players_per_team - won_count - 1
+    # Per-team override when set, otherwise the auction-wide limit.
+    slots_after_this = auction_team.roster_limit - won_count - 1
     if slots_after_this <= 0:
         return None
 
@@ -355,14 +356,30 @@ class AuctionListCreateView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+        overrides = {
+            int(o['team_id']): o
+            for o in data.pop('team_overrides', []) or []
+            if o.get('team_id') is not None
+        }
+        data.pop('team_ids', None)
+
         auction = Auction.objects.create(manager=request.user, **data)
 
-        # Add teams with starting balance
+        # Add teams, honouring any per-team budget / squad-size override.
+        def positive_int(value):
+            try:
+                number = int(value)
+            except (TypeError, ValueError):
+                return None
+            return number if number > 0 else None
+
         for team in teams:
+            override = overrides.get(team.id, {})
             AuctionTeam.objects.create(
                 auction=auction,
                 team=team,
-                balance=auction.base_balance
+                balance=positive_int(override.get('balance')) or auction.base_balance,
+                max_players=positive_int(override.get('max_players')),
             )
 
         return Response(
@@ -1099,9 +1116,10 @@ class BidListCreateView(APIView):
 
         # Check max roster limit
         won_count = SoldResult.objects.filter(auction=auction, team=team).count()
-        if won_count >= auction.max_players_per_team:
+        roster_limit = auction_team.roster_limit
+        if won_count >= roster_limit:
             return Response(
-                {'error': f'Roster full. You already have {won_count}/{auction.max_players_per_team} players.'},
+                {'error': f'Roster full. You already have {won_count}/{roster_limit} players.'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 

@@ -17,6 +17,14 @@ print(f"MEDIA_ROOT: {os.getenv('MEDIA_ROOT')}")
 
 ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', '*').split(',')
 
+# nginx terminates TLS in front of this app, so Django sees plain http and
+# request.build_absolute_uri() hands out http:// media URLs. On the https website
+# those are blocked as mixed content before nginx's redirect can apply, so player
+# photos and team logos silently fail to load. Trusting X-Forwarded-Proto makes
+# Django build https:// URLs instead.
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+USE_X_FORWARDED_HOST = True
+
 INSTALLED_APPS = [
     'daphne',  # MUST be first — overrides runserver to use ASGI (enables WebSockets)
     'django.contrib.admin',
