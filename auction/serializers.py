@@ -124,6 +124,7 @@ class AuctionTeamSerializer(serializers.ModelSerializer):
                 'id': r.player.id,
                 'name': r.player.name,
                 'level': r.player.level,
+                'position': r.player.position,
                 'sold_price': r.sold_price,
                 'sold_at': r.sold_at.isoformat() if r.sold_at else None,
             }
