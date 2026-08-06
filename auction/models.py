@@ -8,6 +8,10 @@ def generate_auction_id():
     return 'EZN-' + str(uuid.uuid4())[:6].upper()
 
 
+def default_quick_bid_increments():
+    return [5, 10, 25]
+
+
 class AliveManager(models.Manager):
     """Default manager that hides soft-deleted rows.
 
@@ -117,6 +121,10 @@ class Auction(SoftDeleteModel):
     custom_bid_disabled = models.BooleanField(
         default=False,
         help_text='When on, captains can only use the quick-bid buttons — the free-type bid amount input is hidden.'
+    )
+    quick_bid_increments = models.JSONField(
+        default=default_quick_bid_increments,
+        help_text='Dollar amounts for the captain quick-bid buttons, e.g. [5, 10, 25, 50]. One button is rendered per value.'
     )
     is_fixture_only = models.BooleanField(
         default=False,

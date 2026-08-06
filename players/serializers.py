@@ -127,7 +127,7 @@ class ManagerPlayerListSerializer(serializers.ModelSerializer):
         model = PlayerProfile
         fields = [
             'id', 'player_id', 'name', 'phone_number', 'efootball_id', 'instagram_id', 'position', 'country', 'photo',
-            'rating', 'is_verified', 'contacted', 'note', 'applied_at', 'verified_at',
+            'rating', 'is_verified', 'contacted', 'note', 'applied_at', 'verified_at', 'is_rejected', 'rejected_at',
         ]
 
 
@@ -136,11 +136,11 @@ class ManagerPlayerDetailSerializer(serializers.ModelSerializer):
         model = PlayerProfile
         fields = [
             'id', 'player_id', 'name', 'phone_number', 'efootball_id', 'instagram_id', 'position', 'country', 'photo',
-            'rating', 'is_verified', 'contacted', 'note', 'applied_at', 'verified_at',
+            'rating', 'is_verified', 'contacted', 'note', 'applied_at', 'verified_at', 'is_rejected', 'rejected_at',
         ]
         read_only_fields = [
             'player_id', 'name', 'phone_number', 'efootball_id', 'instagram_id', 'position', 'country', 'photo',
-            'rating', 'is_verified', 'applied_at', 'verified_at',
+            'rating', 'is_verified', 'applied_at', 'verified_at', 'is_rejected', 'rejected_at',
         ]
 
 

@@ -43,6 +43,7 @@ urlpatterns = [
 
     # Fixtures
     path('fixture-seasons/', views.FixtureSeasonListCreateView.as_view(), name='fixture-season-list-create'),
+    path('fixtures/', views.AllFixtureCompetitionsView.as_view(), name='all-fixtures-list'),
     path('fixtures/quick-create/', views.FixtureQuickCreateView.as_view(), name='fixture-quick-create'),
     path('auctions/<str:auction_id>/fixtures/', views.FixtureCompetitionListCreateView.as_view(), name='fixture-list-create'),
     path('auctions/<str:auction_id>/fixtures/<int:fixture_id>/', views.FixtureCompetitionDetailView.as_view(), name='fixture-detail'),

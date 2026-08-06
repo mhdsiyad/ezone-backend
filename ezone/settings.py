@@ -42,6 +42,7 @@ INSTALLED_APPS = [
     'auction',
     'teams',
     'players',
+    'assistant',
 ]
 
 MIDDLEWARE = [
@@ -187,3 +188,31 @@ if USE_R2:
     # Absolute R2 URLs come from the storage backend, so MEDIA_URL is unused for
     # uploads — kept only for any code that still concatenates it.
     MEDIA_URL = f"https://{os.getenv('R2_PUBLIC_DOMAIN', '')}/"
+
+# AI assistant — provider-agnostic (see assistant/ai/). AI_PROVIDER/AI_MODEL
+# seed the persisted runtime setting the first time it's read; after that the
+# database is the source of truth so switching providers/models never needs a
+# code change or restart (see assistant.models.AIRuntimeSetting).
+AI_PROVIDER = os.getenv('AI_PROVIDER', 'groq')
+# groq/compound and groq/compound-mini are Groq's agentic models — they reject
+# custom tool calling outright, which every assistant turn relies on. They stay
+# in the model registry (selectable, with a clear error if picked), but the
+# default needs to be a model that actually supports tools.
+AI_MODEL = os.getenv('AI_MODEL', 'openai/gpt-oss-120b')
+GROQ_API_KEY = os.getenv('GROQ_API_KEY')
+
+# NVIDIA kept configured as a selectable secondary provider.
+NVIDIA_API_KEY = os.getenv('NVIDIA_API')
+NVIDIA_BASE_URL = 'https://integrate.api.nvidia.com/v1'
+NVIDIA_MODEL = 'z-ai/glm-5.2'
+
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'handlers': {
+        'console': {'class': 'logging.StreamHandler'},
+    },
+    'loggers': {
+        'ai': {'handlers': ['console'], 'level': 'INFO', 'propagate': False},
+    },
+}

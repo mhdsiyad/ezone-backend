@@ -14,6 +14,7 @@ from .models import (
     FixtureMatch,
     FixtureLineup,
     CustomTournament,
+    default_quick_bid_increments,
 )
 
 
@@ -381,7 +382,8 @@ class AuctionListSerializer(serializers.ModelSerializer):
         model = Auction
         fields = ['id', 'title', 'auction_type', 'status', 'total_teams', 'time_limit',
                   'base_balance', 'max_players_per_team', 'price_decrement',
-                  'price_lock_enabled', 'custom_bid_disabled', 'is_fixture_only', 'created_at']
+                  'price_lock_enabled', 'custom_bid_disabled', 'quick_bid_increments',
+                  'is_fixture_only', 'created_at']
 
     def get_total_teams(self, obj):
         return obj.teams.count()
@@ -400,7 +402,7 @@ class AuctionDetailSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'title', 'auction_type', 'status', 'time_limit', 'base_balance',
             'max_players_per_team', 'price_decrement', 'price_lock_enabled',
-            'custom_bid_disabled', 'current_timer', 'current_player',
+            'custom_bid_disabled', 'quick_bid_increments', 'current_timer', 'current_player',
             'teams', 'highest_bid', 'recent_bids',
             'total_players', 'sold_players', 'created_at'
         ]
@@ -441,9 +443,18 @@ class AuctionCreateSerializer(serializers.Serializer):
     price_decrement = serializers.IntegerField(default=5, min_value=0)
     price_lock_enabled = serializers.BooleanField(default=False)
     custom_bid_disabled = serializers.BooleanField(default=False)
+    quick_bid_increments = serializers.ListField(
+        child=serializers.IntegerField(min_value=1), required=False,
+        default=default_quick_bid_increments, min_length=1, max_length=6,
+    )
     team_ids = serializers.ListField(child=serializers.IntegerField(), min_length=1)
     # Optional per-team overrides: [{team_id, balance?, max_players?}]. Anything
     # omitted falls back to the auction-wide base_balance / max_players_per_team.
     team_overrides = serializers.ListField(
         child=serializers.DictField(), required=False, default=list
     )
+
+    def validate_quick_bid_increments(self, value):
+        # De-dupe and sort ascending so the buttons render smallest-to-largest
+        # regardless of the order the manager typed them in.
+        return sorted(set(value))

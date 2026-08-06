@@ -41,6 +41,12 @@ class PlayerProfile(models.Model):
     note = models.TextField(blank=True, default='')
     applied_at = models.DateTimeField(auto_now_add=True)
     verified_at = models.DateTimeField(null=True, blank=True)
+    # Rejecting an application used to mean hard-deleting the row (and its photo)
+    # with no way back. This flag lets a manager (or the assistant) reject an
+    # application without destroying it — it just drops out of the default
+    # pending queue instead of disappearing.
+    is_rejected = models.BooleanField(default=False)
+    rejected_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ['-applied_at']

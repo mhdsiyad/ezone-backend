@@ -158,6 +158,10 @@ class ManagerPlayerListView(generics.ListAPIView):
         if contacted in ('true', 'false'):
             qs = qs.filter(contacted=(contacted == 'true'))
 
+        is_rejected = params.get('is_rejected')
+        if is_rejected in ('true', 'false'):
+            qs = qs.filter(is_rejected=(is_rejected == 'true'))
+
         search = params.get('search')
         if search:
             qs = qs.filter(

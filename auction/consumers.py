@@ -278,8 +278,10 @@ class AuctionConsumer(AsyncWebsocketConsumer):
 
         floor = top_bid.amount if top_bid else auction.current_player.base_price
 
-        if amount <= floor:
-            return {'error': f'Bid must be greater than ${floor}.'}
+        # The opening bid on a player may match the base price exactly; every bid
+        # after that must strictly raise it.
+        if (amount < floor) if not top_bid else (amount <= floor):
+            return {'error': f'Bid must be at least ${floor}.' if not top_bid else f'Bid must be greater than ${floor}.'}
 
         if amount > auction_team.balance:
             return {'error': f'Insufficient balance. You have ${auction_team.balance}.'}

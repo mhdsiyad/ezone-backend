@@ -11,7 +11,8 @@ from django.contrib.auth import get_user_model
 from django.utils import timezone
 from channels.layers import get_channel_layer
 from asgiref.sync import async_to_sync
-from rest_framework import status
+from rest_framework import generics, status
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -1102,9 +1103,11 @@ class BidListCreateView(APIView):
 
         floor = top_bid.amount if top_bid else auction.current_player.base_price
 
-        if amount <= floor:
+        # The opening bid on a player may match the base price exactly (first team
+        # to act claims it at that price); every bid after that must strictly raise it.
+        if (amount < floor) if not top_bid else (amount <= floor):
             return Response(
-                {'error': f'Bid must exceed ${floor}.'},
+                {'error': f'Bid must exceed ${floor}.' if top_bid else f'Bid must be at least ${floor}.'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
@@ -1349,6 +1352,31 @@ def _create_fixture_competition(auction, teams, data):
         _generate_league_matches(competition, teams)
 
     return competition
+
+
+class FixtureCompetitionPagination(PageNumberPagination):
+    page_size = 6
+
+
+class AllFixtureCompetitionsView(generics.ListAPIView):
+    """Every tournament across every auction owned by this manager, paginated
+    6 at a time for the Tournament Center's scroll-to-load-more list — one
+    query per page instead of fetching each auction's fixtures separately
+    (quick-created tournaments each live in their own dedicated auction, so
+    that used to mean one request per tournament)."""
+    permission_classes = [IsManagerPermission]
+    serializer_class = FixtureCompetitionListSerializer
+    pagination_class = FixtureCompetitionPagination
+
+    def get_queryset(self):
+        # FixtureCompetition.objects already excludes soft-deleted competitions
+        # (AliveManager is the default manager) — auction__is_deleted=False adds
+        # the same guarantee for the parent auction, since a related-field filter
+        # like auction__manager joins the raw table and bypasses that default.
+        return FixtureCompetition.objects.filter(
+            auction__manager=self.request.user,
+            auction__is_deleted=False,
+        ).select_related('auction', 'season').order_by('-created_at')
 
 
 class FixtureCompetitionListCreateView(APIView):
