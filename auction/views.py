@@ -1387,14 +1387,15 @@ class BidListCreateView(APIView):
             _start_timer(auction_id)
 
         # If a 3-2-1 countdown was in progress, this bid cancels it
-        elif _active_countdowns.get(auction_id):
+        if _active_countdowns.get(auction_id):
             _cancel_countdown(auction_id)
             # Clear the countdown overlay for all clients
             get_channel_layer_broadcast(group_name, {
                 'type': 'bid_countdown', 'value': None
             })
-            # Restart the timer so bidding continues
-            _start_timer(auction_id)
+            # If timer_extended was false, we still need to restart the timer
+            if not timer_extended:
+                _start_timer(auction_id)
 
         return Response(bid_data, status=status.HTTP_201_CREATED)
 
