@@ -138,58 +138,84 @@ class AuctionConsumer(AsyncWebsocketConsumer):
             await self.send(text_data=json.dumps({'type': 'pong'}))
 
     async def handle_bid(self, data):
-        """Validate and save bid from captain, then broadcast."""
-        user = self.scope.get('user')
-        if not user or not user.is_authenticated or user.role != 'captain':
-            await self.send(text_data=json.dumps({
-                'type': 'error',
-                'message': 'Only captains can place bids.'
-            }))
-            return
+        """Processes an incoming bid request and broadcasts updates."""
+        try:
+            user = self.scope['user']
+            if not user.is_authenticated:
+                await self.send(text_data=json.dumps({
+                    'type': 'error',
+                    'message': 'You must be logged in to bid.'
+                }))
+                return
 
-        amount = data.get('amount')
-        if not amount or not isinstance(amount, (int, float)) or amount <= 0:
-            await self.send(text_data=json.dumps({
-                'type': 'error',
-                'message': 'Invalid bid amount.'
-            }))
-            return
+            if user.role != 'captain':
+                await self.send(text_data=json.dumps({
+                    'type': 'error',
+                    'message': 'Only team captains can place bids.'
+                }))
+                return
 
-        result = await self.save_bid(user, int(amount))
-        if result.get('error'):
-            await self.send(text_data=json.dumps({
-                'type': 'error',
-                'message': result['error']
-            }))
-            return
+            amount = data.get('amount')
+            if not amount or not isinstance(amount, (int, float)) or amount <= 0:
+                await self.send(text_data=json.dumps({
+                    'type': 'error',
+                    'message': 'Invalid bid amount.'
+                }))
+                return
 
-        # Broadcast bid to all in the group
-        await self.channel_layer.group_send(
-            self.group_name,
-            {
-                'type': 'bid_update',
-                'bid': result['bid']
-            }
-        )
+            result = await self.save_bid(user, int(amount))
 
-        # If a 3-2-1 countdown was running, this bid cancels it
-        from auction.views import _active_countdowns, _cancel_countdown, _start_timer
-        if _active_countdowns.get(self.auction_id):
-            _cancel_countdown(self.auction_id)
-            await self.channel_layer.group_send(self.group_name, {
-                'type': 'bid_countdown', 'value': None
-            })
-            _start_timer(self.auction_id)
+            if result.get('error'):
+                await self.send(text_data=json.dumps({
+                    'type': 'error',
+                    'message': result['error']
+                }))
+                return
 
-        # If timer < 10s, extend and broadcast updated timer
-        elif result.get('timer_extended'):
+            # Broadcast bid to all in the group
             await self.channel_layer.group_send(
                 self.group_name,
                 {
-                    'type': 'timer_update',
-                    'timeLeft': result['new_timer']
+                    'type': 'bid_update',
+                    'bid': result['bid']
                 }
             )
+
+            # Force status to active in case _handle_timer_expired raced and marked it pending
+            await self.channel_layer.group_send(
+                self.group_name,
+                {
+                    'type': 'auction_status',
+                    'status': 'active'
+                }
+            )
+
+            from auction.views import _active_countdowns, _cancel_countdown, _start_timer
+            
+            # If a 3-2-1 countdown was running, this bid cancels it
+            countdown_cancelled = False
+            if _active_countdowns.get(self.auction_id):
+                _cancel_countdown(self.auction_id)
+                await self.channel_layer.group_send(self.group_name, {
+                    'type': 'bid_countdown', 'value': None
+                })
+                countdown_cancelled = True
+
+            # If timer < 10s, extend and broadcast updated timer.
+            if result.get('timer_extended'):
+                await self.channel_layer.group_send(
+                    self.group_name,
+                    {
+                        'type': 'timer_update',
+                        'timeLeft': result['new_timer']
+                    }
+                )
+                _start_timer(self.auction_id)
+            elif countdown_cancelled:
+                # If we cancelled a countdown but timer was already >= 10, we still need to restart the timer thread
+                _start_timer(self.auction_id)
+        except Exception:
+            pass
 
     # ── Database helpers ────────────────────────────────────────────────────
 
@@ -247,79 +273,87 @@ class AuctionConsumer(AsyncWebsocketConsumer):
     def save_bid(self, user, amount):
         from .models import Auction, AuctionTeam, Bid, Player, SoldResult
         from .serializers import BidSerializer
+        from django.db import transaction
 
-        try:
-            auction = Auction.objects.get(id=self.auction_id)
-        except Auction.DoesNotExist:
-            return {'error': 'Auction not found.'}
+        with transaction.atomic():
+            try:
+                auction = Auction.objects.select_for_update().get(id=self.auction_id)
+            except Auction.DoesNotExist:
+                return {'error': 'Auction not found.'}
 
-        if auction.status != 'active':
-            return {'error': 'Auction is not currently active.'}
+            if auction.status != 'active':
+                return {'error': 'Auction is not currently active.'}
 
-        if not auction.current_player:
-            return {'error': 'No player is currently up for auction.'}
+            if not auction.current_player:
+                return {'error': 'No player is currently up for auction.'}
 
-        # Get team via captain's linked team
-        try:
-            team = user.team
-        except Exception:
-            return {'error': 'Captain has no team assigned.'}
+            # Get team via captain's linked team
+            try:
+                team = user.team
+            except Exception:
+                return {'error': 'Captain has no team assigned.'}
 
-        # Verify team is part of this auction
-        try:
-            auction_team = AuctionTeam.objects.get(auction=auction, team=team)
-        except AuctionTeam.DoesNotExist:
-            return {'error': 'Your team is not part of this auction.'}
+            # Verify team is part of this auction
+            try:
+                auction_team = AuctionTeam.objects.get(auction=auction, team=team)
+            except AuctionTeam.DoesNotExist:
+                return {'error': 'Your team is not part of this auction.'}
 
-        # Get current highest bid
-        top_bid = Bid.objects.filter(
-            auction=auction, player=auction.current_player
-        ).order_by('-amount').first()
+            # Get current highest bid
+            top_bid = Bid.objects.filter(
+                auction=auction, player=auction.current_player
+            ).order_by('-amount').first()
 
-        floor = top_bid.amount if top_bid else auction.current_player.base_price
+            floor = top_bid.amount if top_bid else auction.current_player.base_price
 
-        # The opening bid on a player may match the base price exactly; every bid
-        # after that must strictly raise it.
-        if (amount < floor) if not top_bid else (amount <= floor):
-            return {'error': f'Bid must be at least ${floor}.' if not top_bid else f'Bid must be greater than ${floor}.'}
+            # The opening bid on a player may match the base price exactly; every bid
+            # after that must strictly raise it.
+            if (amount < floor) if not top_bid else (amount <= floor):
+                return {'error': f'Bid must be at least ${floor}.' if not top_bid else f'Bid must be greater than ${floor}.'}
 
-        if amount > auction_team.balance:
-            return {'error': f'Insufficient balance. You have ${auction_team.balance}.'}
+            if amount > auction_team.balance:
+                return {'error': f'Insufficient balance. You have ${auction_team.balance}.'}
 
-        from .views import price_locked_max_bid
-        won_count = SoldResult.objects.filter(auction=auction, team=team).count()
-        max_locked_bid = price_locked_max_bid(auction, auction_team, won_count)
-        if max_locked_bid is not None and amount > max_locked_bid:
-            return {'error': f'Price Lock: max bid is ${max_locked_bid} — you must reserve enough balance for your remaining roster slots.'}
+            from .views import price_locked_max_bid
+            won_count = SoldResult.objects.filter(auction=auction, team=team).count()
+            max_locked_bid = price_locked_max_bid(auction, auction_team, won_count)
+            if max_locked_bid is not None and amount > max_locked_bid:
+                return {'error': f'Price Lock: max bid is ${max_locked_bid} — you must reserve enough balance for your remaining roster slots.'}
 
-        # Save bid
-        bid = Bid.objects.create(
-            auction=auction,
-            player=auction.current_player,
-            team=team,
-            amount=amount
-        )
+            # Save bid
+            bid = Bid.objects.create(
+                auction=auction,
+                player=auction.current_player,
+                team=team,
+                amount=amount
+            )
+            bid.refresh_from_db()
 
-        # Extend timer if < 10s
-        timer_extended = False
-        new_timer = auction.current_timer
-        if auction.current_timer < 10:
-            auction.current_timer = 10
-            auction.save(update_fields=['current_timer'])
-            timer_extended = True
-            new_timer = 10
+            # Extend timer if < 10s and force status to active to fix race condition with _handle_timer_expired
+            timer_extended = False
+            new_timer = auction.current_timer
+            update_fields = ['status']
+            auction.status = 'active'
+            
+            if auction.current_timer < 10:
+                auction.current_timer = 10
+                update_fields.append('current_timer')
+                timer_extended = True
+                new_timer = 10
+                
+            auction.save(update_fields=update_fields)
 
-        return {
-            'bid': {
-                'id': bid.id,
-                'team_id': team.id,
-                'team_name': team.name,
-                'amount': bid.amount,
-                'timestamp': bid.timestamp.isoformat(),
-            },
-            'timer_extended': timer_extended,
-            'new_timer': new_timer,
-        }
+            return {
+                'bid': {
+                    'id': bid.id,
+                    'team_id': team.id,
+                    'team_name': team.name,
+                    'amount': bid.amount,
+                    'timestamp': bid.timestamp.isoformat(),
+                },
+                'timer_extended': timer_extended,
+                'new_timer': new_timer,
+            }
 
     # ── Channel layer message handlers (server → client broadcasts) ─────────
 

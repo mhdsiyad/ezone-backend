@@ -72,8 +72,8 @@ class PlayerInline(admin.TabularInline):
 
 @admin.register(Auction)
 class AuctionAdmin(SoftDeleteAdmin):
-    list_display = ['id', 'title', 'status', 'manager', 'price_lock_enabled', 'custom_bid_disabled', 'created_at', 'deleted_flag']
-    list_filter = ['is_deleted', 'status', 'price_lock_enabled', 'custom_bid_disabled']
+    list_display = ['id', 'title', 'status', 'manager', 'is_public', 'price_lock_enabled', 'custom_bid_disabled', 'created_at', 'deleted_flag']
+    list_filter = ['is_deleted', 'status', 'is_public', 'price_lock_enabled', 'custom_bid_disabled']
     search_fields = ['title', 'id']
     inlines = [AuctionTeamInline, PlayerInline]
     readonly_fields = ['created_at', 'started_at', 'ended_at']

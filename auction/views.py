@@ -1,6 +1,7 @@
 import asyncio
 import csv
 import io
+import logging
 import random
 import string
 import threading
@@ -37,6 +38,7 @@ from .models import (
 from .permissions import IsManagerPermission, IsCaptainPermission
 from .stats import _fixture_table, _fixture_group_tables, _fixture_player_stats
 from .serializers import (
+    AuctioneerSerializer,
     AuctionCreateSerializer,
     AuctionDetailSerializer,
     AuctionListSerializer,
@@ -61,6 +63,7 @@ from .serializers import (
 )
 
 User = get_user_model()
+logger = logging.getLogger(__name__)
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -121,39 +124,72 @@ def _cancel_countdown(auction_id):
 
 
 def _start_timer(auction_id):
-    """Module-level helper: cancel old timer and start a fresh one from DB value."""
-    _cancel_timer(auction_id)
+    """Module-level helper: cancel old timer and start a fresh one from DB value.
+
+    Cancelling the previous stop_event and registering the new one happens
+    under a single lock acquisition. Two overlapping callers (e.g. a bid
+    interrupting a countdown at the same moment the countdown loop itself
+    reacts to being cancelled) used to be able to interleave — call B's
+    "cancel old" could run between call A's cancel and register, stopping
+    A's brand-new thread instead of the true predecessor, and leaving
+    `_active_timers` pointing at a stop_event nobody will ever run — which
+    made the timer look permanently frozen since a later pause/next_player
+    would signal a thread that had already exited.
+    """
     stop_event = threading.Event()
     with _active_timers_lock:
+        old = _active_timers.get(auction_id)
+        if old:
+            old.set()
         _active_timers[auction_id] = stop_event
 
     def run():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(_run_timer(auction_id, stop_event))
-        loop.close()
-        with _active_timers_lock:
-            if _active_timers.get(auction_id) is stop_event:
-                del _active_timers[auction_id]
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(_run_timer(auction_id, stop_event))
+            finally:
+                loop.close()
+        except Exception:
+            # A transient error (e.g. a channel-layer/Redis blip) must not
+            # silently kill the countdown — log it and let the timer sit
+            # cancelled rather than appear to hang forever with no trace.
+            logger.exception('Timer loop crashed for auction %s', auction_id)
+        finally:
+            with _active_timers_lock:
+                if _active_timers.get(auction_id) is stop_event:
+                    del _active_timers[auction_id]
 
     threading.Thread(target=run, daemon=True).start()
 
 
 def _start_countdown(auction_id):
-    """Module-level helper: cancel old countdown and start a fresh one."""
-    _cancel_countdown(auction_id)
+    """Module-level helper: cancel old countdown and start a fresh one.
+
+    See _start_timer for why cancel+register must happen under one lock.
+    """
     stop_event = threading.Event()
     with _active_countdowns_lock:
+        old = _active_countdowns.get(auction_id)
+        if old:
+            old.set()
         _active_countdowns[auction_id] = stop_event
 
     def run():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(_run_countdown(auction_id, stop_event))
-        loop.close()
-        with _active_countdowns_lock:
-            if _active_countdowns.get(auction_id) is stop_event:
-                del _active_countdowns[auction_id]
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(_run_countdown(auction_id, stop_event))
+            finally:
+                loop.close()
+        except Exception:
+            logger.exception('Countdown loop crashed for auction %s', auction_id)
+        finally:
+            with _active_countdowns_lock:
+                if _active_countdowns.get(auction_id) is stop_event:
+                    del _active_countdowns[auction_id]
 
     threading.Thread(target=run, daemon=True).start()
 
@@ -313,6 +349,76 @@ class TeamDetailView(APIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+# ── Auctioneer Views ─────────────────────────────────────────────────────────
+# An auctioneer is a login-only spectator: a manager grants the account
+# pause/resume access to specific auctions and nothing else. Scoped to the
+# manager who created it, the same way Team/captain accounts are scoped.
+
+class AuctioneerListCreateView(APIView):
+    permission_classes = [IsManagerPermission]
+
+    def get(self, request):
+        auctioneers = User.objects.filter(
+            role='auctioneer', created_by=request.user
+        ).order_by('username')
+        return Response(AuctioneerSerializer(auctioneers, many=True).data)
+
+    def post(self, request):
+        username = (request.data.get('username') or '').strip()
+        password = (request.data.get('password') or '').strip()
+        if not username or not password:
+            return Response({'error': 'Username and password required.'}, status=status.HTTP_400_BAD_REQUEST)
+        if User.objects.filter(username=username).exists():
+            return Response({'error': 'Username already taken.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        auctioneer = User.objects.create_user(
+            username=username, password=password, role='auctioneer', created_by=request.user
+        )
+
+        auction_ids = request.data.get('auction_ids') or []
+        if auction_ids:
+            auctions = Auction.objects.filter(id__in=auction_ids, manager=request.user)
+            auctioneer.auctioneer_auctions.set(auctions)
+
+        return Response(AuctioneerSerializer(auctioneer).data, status=status.HTTP_201_CREATED)
+
+
+class AuctioneerDetailView(APIView):
+    permission_classes = [IsManagerPermission]
+
+    def patch(self, request, pk):
+        try:
+            auctioneer = User.objects.get(pk=pk, role='auctioneer', created_by=request.user)
+        except User.DoesNotExist:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+
+        # Assignment is always sent as the full desired list — simplest to
+        # reason about from the UI's checkbox grid, and .set() is idempotent.
+        if 'auction_ids' in request.data:
+            auction_ids = request.data.get('auction_ids') or []
+            auctions = Auction.objects.filter(id__in=auction_ids, manager=request.user)
+            auctioneer.auctioneer_auctions.set(auctions)
+
+        new_password = (request.data.get('password') or '').strip()
+        if new_password:
+            auctioneer.set_password(new_password)
+            auctioneer.save(update_fields=['password'])
+
+        return Response(AuctioneerSerializer(auctioneer).data)
+
+    def delete(self, request, pk):
+        try:
+            auctioneer = User.objects.get(pk=pk, role='auctioneer', created_by=request.user)
+        except User.DoesNotExist:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+
+        # Deactivate rather than hard-delete — consistent with how captain
+        # accounts are revoked when a team is removed.
+        auctioneer.is_active = False
+        auctioneer.save(update_fields=['is_active'])
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
 # ── Auction Views ─────────────────────────────────────────────────────────────
 
 class AuctionListCreateView(APIView):
@@ -335,9 +441,12 @@ class AuctionListCreateView(APIView):
                 auctions = Auction.objects.filter(id__in=auction_ids)
             else:
                 auctions = Auction.objects.none()
+        elif user.is_authenticated and user.role == 'auctioneer':
+            # Only auctions their manager explicitly granted them access to
+            auctions = user.auctioneer_auctions.all()
         else:
-            # Public: show all active/pending/paused auctions
-            auctions = Auction.objects.exclude(status='ended')
+            # Public: only auctions the manager has explicitly opted into showing
+            auctions = Auction.objects.exclude(status='ended').filter(is_public=True)
 
         serializer = AuctionListSerializer(auctions, many=True)
         return Response(serializer.data)
@@ -391,7 +500,7 @@ class AuctionListCreateView(APIView):
 
 class AuctionDetailView(APIView):
     def get_permissions(self):
-        if self.request.method == 'DELETE':
+        if self.request.method in ('DELETE', 'PATCH'):
             return [IsManagerPermission()]
         return [AllowAny()]
 
@@ -403,6 +512,37 @@ class AuctionDetailView(APIView):
 
         serializer = AuctionDetailSerializer(auction)
         return Response(serializer.data)
+
+    def patch(self, request, auction_id):
+        try:
+            auction = Auction.objects.get(id=auction_id, manager=request.user)
+        except Auction.DoesNotExist:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+
+        # Only these flags are editable here — everything else that's
+        # mutable about an auction goes through AuctionControlView or is fixed
+        # at creation time.
+        editable_fields = {'is_public', 'auto_advance_enabled', 'auto_count_enabled'}
+        sent_fields = editable_fields & set(request.data.keys())
+        if not sent_fields:
+            return Response(
+                {'error': 'Provide at least one of: is_public, auto_advance_enabled, auto_count_enabled.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        update_fields = []
+        if 'is_public' in sent_fields:
+            auction.is_public = bool(request.data['is_public'])
+            update_fields.append('is_public')
+        if 'auto_advance_enabled' in sent_fields:
+            auction.auto_advance_enabled = bool(request.data['auto_advance_enabled'])
+            update_fields.append('auto_advance_enabled')
+        if 'auto_count_enabled' in sent_fields:
+            auction.auto_count_enabled = bool(request.data['auto_count_enabled'])
+            update_fields.append('auto_count_enabled')
+
+        auction.save(update_fields=update_fields)
+        return Response(AuctionListSerializer(auction).data)
 
     def delete(self, request, auction_id):
         try:
@@ -606,15 +746,35 @@ class PlayerPriceUpdateView(APIView):
 # ── Auction Control View ──────────────────────────────────────────────────────
 
 class AuctionControlView(APIView):
-    permission_classes = [IsManagerPermission]
+    # Managers get every action; auctioneers get pause/resume only, and only
+    # for auctions their manager explicitly assigned them. Enforced below
+    # rather than via permission_classes since it depends on the request body.
+    permission_classes = [IsAuthenticated]
+
+    AUCTIONEER_ALLOWED_ACTIONS = {'pause', 'resume', 'start_count'}
 
     def post(self, request, auction_id):
-        try:
-            auction = Auction.objects.get(id=auction_id, manager=request.user)
-        except Auction.DoesNotExist:
-            return Response(status=status.HTTP_404_NOT_FOUND)
-
         action = request.data.get('action')
+        user = request.user
+
+        if user.role == 'manager':
+            try:
+                auction = Auction.objects.get(id=auction_id, manager=user)
+            except Auction.DoesNotExist:
+                return Response(status=status.HTTP_404_NOT_FOUND)
+        elif user.role == 'auctioneer':
+            if action not in self.AUCTIONEER_ALLOWED_ACTIONS:
+                return Response(
+                    {'error': 'Auctioneers may only pause or resume.'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+            try:
+                auction = user.auctioneer_auctions.get(id=auction_id)
+            except Auction.DoesNotExist:
+                return Response(status=status.HTTP_404_NOT_FOUND)
+        else:
+            return Response(status=status.HTTP_403_FORBIDDEN)
+
         group_name = f'auction_{auction_id}'
 
         if action == 'start':
@@ -801,25 +961,36 @@ async def _run_timer(auction_id, stop_event):
         if stop_event.is_set():
             break
 
-        current_status, time_left = await tick()
+        try:
+            current_status, time_left = await tick()
 
-        if current_status != 'active':
-            break
+            if current_status != 'active':
+                break
 
-        await channel_layer.group_send(group_name, {
-            'type': 'timer_update',
-            'timeLeft': time_left
-        })
+            await channel_layer.group_send(group_name, {
+                'type': 'timer_update',
+                'timeLeft': time_left
+            })
 
-        if time_left == 0:
-            await _handle_timer_expired(auction_id, channel_layer, group_name)
-            break
+            if time_left == 0:
+                await _handle_timer_expired(auction_id, channel_layer, group_name)
+                break
+        except Exception:
+            # A single bad tick (e.g. a momentary DB or Redis blip) used to
+            # propagate out of the loop and kill the thread outright — the
+            # timer would then sit frozen at whatever it last broadcast,
+            # since nothing else re-starts it until the next manual control
+            # action. Log it and keep ticking instead of dying silently.
+            logger.exception('Timer tick failed for auction %s', auction_id)
 
         # Sleep 1 second but wake early if stopped
         for _ in range(10):
             if stop_event.is_set():
                 break
             await asyncio.sleep(0.1)
+        
+        if stop_event.is_set():
+            break
 
 
 async def _handle_timer_expired(auction_id, channel_layer, group_name):
@@ -829,36 +1000,38 @@ async def _handle_timer_expired(auction_id, channel_layer, group_name):
 
     @sync_to_async
     def check_and_mark_unsold():
-        try:
-            auction = Auction.objects.get(id=auction_id)
-        except Auction.DoesNotExist:
-            return None
+        from django.db import transaction
+        with transaction.atomic():
+            try:
+                auction = Auction.objects.select_for_update().get(id=auction_id)
+            except Auction.DoesNotExist:
+                return None
 
-        if not auction.current_player:
-            return None
+            if not auction.current_player:
+                return None
 
-        top_bid = Bid.objects.filter(
-            auction=auction, player=auction.current_player
-        ).order_by('-amount').first()
+            top_bid = Bid.objects.filter(
+                auction=auction, player=auction.current_player
+            ).order_by('-amount').first()
 
-        if not top_bid:
-            # No bids → mark UNSOLD, push to end of queue
-            player = auction.current_player
-            player.skipped = True
-            player.base_price = max(0, player.base_price - auction.price_decrement)
+            if not top_bid:
+                # No bids → mark UNSOLD, push to end of queue
+                player = auction.current_player
+                player.skipped = True
+                player.base_price = max(0, player.base_price - auction.price_decrement)
 
-            # Move to end by updating order
-            max_order = Player.objects.filter(
-                auction=auction
-            ).order_by('-order').values_list('order', flat=True).first() or 0
-            player.order = max_order + 1
-            player.save(update_fields=['skipped', 'order', 'base_price'])
+                # Move to end by updating order
+                max_order = Player.objects.filter(
+                    auction=auction
+                ).order_by('-order').values_list('order', flat=True).first() or 0
+                player.order = max_order + 1
+                player.save(update_fields=['skipped', 'order', 'base_price'])
 
-            auction.status = 'pending'
-            auction.save(update_fields=['status'])
-            return 'unsold'
+                auction.status = 'pending'
+                auction.save(update_fields=['status'])
+                return 'unsold'
 
-        return 'has_bid'
+            return 'has_bid'
 
     result = await check_and_mark_unsold()
 
@@ -871,6 +1044,18 @@ async def _handle_timer_expired(auction_id, channel_layer, group_name):
             'type': 'auction_status',
             'status': 'pending'
         })
+    elif result == 'has_bid':
+        # Timer expired with bids — check if auto-count is enabled
+        @sync_to_async
+        def check_auto_count():
+            try:
+                a = Auction.objects.get(id=auction_id)
+                return a.auto_count_enabled
+            except Auction.DoesNotExist:
+                return False
+
+        if await check_auto_count():
+            _start_countdown(auction_id)
 
 
 async def _run_countdown(auction_id, stop_event):
@@ -985,21 +1170,32 @@ async def _run_countdown(auction_id, stop_event):
         if players:
             next_player = players[0]
 
-        if next_player:
+        if next_player and auction.auto_advance_enabled:
             auction.current_player = next_player
             auction.current_timer = auction.time_limit
             auction.status = 'pending'
             auction.save(update_fields=['current_player', 'current_timer', 'status'])
             next_player_data = PlayerSerializer(next_player).data
+            awaiting_manual_next = False
+        elif next_player:
+            # Manual mode: players remain in the queue, but the block sits empty
+            # until the manager clicks Next Player themselves.
+            auction.current_player = None
+            auction.current_timer = 0
+            auction.status = 'pending'
+            auction.save(update_fields=['current_player', 'current_timer', 'status'])
+            next_player_data = None
+            awaiting_manual_next = True
         else:
             # No more players
             auction.status = 'ended'
             auction.save(update_fields=['status'])
             next_player_data = None
+            awaiting_manual_next = False
 
-        return sold_msg, teams_data, next_player_data, auction.time_limit
+        return sold_msg, teams_data, next_player_data, auction.time_limit, awaiting_manual_next
 
-    sold_msg, teams_data, next_player_data, time_limit = await mark_sold_and_advance()
+    sold_msg, teams_data, next_player_data, time_limit, awaiting_manual_next = await mark_sold_and_advance()
 
     if not sold_msg:
         return
@@ -1027,6 +1223,19 @@ async def _run_countdown(auction_id, stop_event):
         })
         await channel_layer.group_send(group_name, {
             'type': 'timer_update', 'timeLeft': time_limit
+        })
+        await channel_layer.group_send(group_name, {
+            'type': 'auction_status', 'status': 'pending'
+        })
+    elif awaiting_manual_next:
+        # Manual mode: clear the block for everyone and wait for the manager's
+        # explicit Next Player click instead of silently leaving the just-sold
+        # player's card on screen.
+        await channel_layer.group_send(group_name, {
+            'type': 'player_update', 'player': None, 'timer': 0,
+        })
+        await channel_layer.group_send(group_name, {
+            'type': 'timer_update', 'timeLeft': 0
         })
         await channel_layer.group_send(group_name, {
             'type': 'auction_status', 'status': 'pending'
@@ -1142,12 +1351,18 @@ class BidListCreateView(APIView):
             amount=amount,
         )
 
-        # Extend timer if < 10s
-        timer_extended = False
-        if auction.current_timer < 10:
-            auction.current_timer = 10
-            auction.save(update_fields=['current_timer'])
-            timer_extended = True
+        # Extend timer if < 10s. `auction` was fetched at the top of this
+        # request — by now the background timer thread (and possibly a
+        # concurrent bid from another captain) may have moved the real DB
+        # value well past that stale snapshot. A blind
+        # `auction.current_timer = 10; auction.save()` here would decide
+        # whether to extend based on that stale value, and — racing against
+        # the timer thread's own read-modify-write of the same row — could
+        # silently lose either update. Do it as a single atomic UPDATE
+        # instead, conditioned on the *current* row, so it's race-free.
+        timer_extended = Auction.objects.filter(
+            id=auction_id, current_timer__lt=10
+        ).update(current_timer=10) > 0
 
         bid_data = {
             'id': bid.id,
@@ -1168,9 +1383,11 @@ class BidListCreateView(APIView):
                 'type': 'timer_update',
                 'timeLeft': 10
             })
+            # Restart the background timer thread
+            _start_timer(auction_id)
 
         # If a 3-2-1 countdown was in progress, this bid cancels it
-        if _active_countdowns.get(auction_id):
+        elif _active_countdowns.get(auction_id):
             _cancel_countdown(auction_id)
             # Clear the countdown overlay for all clients
             get_channel_layer_broadcast(group_name, {
@@ -2083,10 +2300,12 @@ class PublicAuctionListView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request):
-        auctions = Auction.objects.filter(is_fixture_only=False)
+        auctions = Auction.objects.filter(is_fixture_only=False, is_public=True)
         status_filter = request.query_params.get('status')
         if status_filter:
             auctions = auctions.filter(status=status_filter)
+        else:
+            auctions = auctions.exclude(status='ended')
         return Response(
             AuctionListSerializer(auctions.order_by('-created_at'), many=True).data
         )

@@ -82,6 +82,21 @@ class TeamCreateSerializer(serializers.Serializer):
         return value
 
 
+class AuctioneerSerializer(serializers.ModelSerializer):
+    """A login-only account a manager grants pause/resume access to specific
+    auctions — nothing else. `auction_ids` drives the assignment checkboxes on
+    the manager's Auctioneers page.
+    """
+    auction_ids = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = ['id', 'username', 'is_active', 'date_joined', 'auction_ids']
+
+    def get_auction_ids(self, obj):
+        return list(obj.auctioneer_auctions.values_list('id', flat=True))
+
+
 class PlayerSerializer(serializers.ModelSerializer):
     stats = serializers.SerializerMethodField()
 
@@ -383,7 +398,7 @@ class AuctionListSerializer(serializers.ModelSerializer):
         fields = ['id', 'title', 'auction_type', 'status', 'total_teams', 'time_limit',
                   'base_balance', 'max_players_per_team', 'price_decrement',
                   'price_lock_enabled', 'custom_bid_disabled', 'quick_bid_increments',
-                  'is_fixture_only', 'created_at']
+                  'is_fixture_only', 'is_public', 'auto_advance_enabled', 'auto_count_enabled', 'created_at']
 
     def get_total_teams(self, obj):
         return obj.teams.count()
@@ -403,7 +418,7 @@ class AuctionDetailSerializer(serializers.ModelSerializer):
             'id', 'title', 'auction_type', 'status', 'time_limit', 'base_balance',
             'max_players_per_team', 'price_decrement', 'price_lock_enabled',
             'custom_bid_disabled', 'quick_bid_increments', 'current_timer', 'current_player',
-            'teams', 'highest_bid', 'recent_bids',
+            'teams', 'highest_bid', 'recent_bids', 'is_public', 'auto_advance_enabled', 'auto_count_enabled',
             'total_players', 'sold_players', 'created_at'
         ]
 
@@ -443,6 +458,8 @@ class AuctionCreateSerializer(serializers.Serializer):
     price_decrement = serializers.IntegerField(default=5, min_value=0)
     price_lock_enabled = serializers.BooleanField(default=False)
     custom_bid_disabled = serializers.BooleanField(default=False)
+    auto_advance_enabled = serializers.BooleanField(default=True)
+    auto_count_enabled = serializers.BooleanField(default=False)
     quick_bid_increments = serializers.ListField(
         child=serializers.IntegerField(min_value=1), required=False,
         default=default_quick_bid_increments, min_length=1, max_length=6,

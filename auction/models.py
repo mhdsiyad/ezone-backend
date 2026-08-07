@@ -59,8 +59,15 @@ class SoftDeleteModel(models.Model):
 
 
 class User(AbstractUser):
-    ROLE_CHOICES = [('manager', 'Manager'), ('captain', 'Captain')]
+    ROLE_CHOICES = [('manager', 'Manager'), ('captain', 'Captain'), ('auctioneer', 'Auctioneer')]
     role = models.CharField(max_length=20, choices=ROLE_CHOICES, default='captain')
+    # Which manager created this account — used for auctioneer accounts, whose
+    # visibility and assignable auctions are scoped to the manager who made them
+    # (mirrors how Team already scopes captains, but Team's link is a plain
+    # username string rather than a real relation, so auctioneer gets a proper FK).
+    created_by = models.ForeignKey(
+        'self', null=True, blank=True, on_delete=models.CASCADE, related_name='created_accounts'
+    )
 
     def __str__(self):
         return f"{self.username} ({self.role})"
@@ -129,6 +136,23 @@ class Auction(SoftDeleteModel):
     is_fixture_only = models.BooleanField(
         default=False,
         help_text='Auto-created container for teams entered directly at fixture-creation time (no live auction ever runs). Hidden from the manager\'s auctions dashboard.'
+    )
+    is_public = models.BooleanField(
+        default=False,
+        help_text='When on, spectators can find and watch this auction on the public Live Auctions page. Off by default — the manager must opt in.'
+    )
+    auto_advance_enabled = models.BooleanField(
+        default=True,
+        help_text='When on, the next player automatically loads onto the block once the current one is sold/unsold. When off, the manager must click Next Player manually.'
+    )
+    auto_count_enabled = models.BooleanField(
+        default=False,
+        help_text='When on, the 3-2-1 countdown starts automatically when the timer hits 0 with bids present. When off, the manager must click Count manually.'
+    )
+    auctioneers = models.ManyToManyField(
+        User, blank=True, related_name='auctioneer_auctions',
+        limit_choices_to={'role': 'auctioneer'},
+        help_text='Auctioneer accounts allowed to watch this auction and pause/resume the timer — no other controls.'
     )
     current_player = models.ForeignKey(
         'Player', null=True, blank=True,

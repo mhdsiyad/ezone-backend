@@ -185,16 +185,18 @@ def _fixture_player_stats(competition, request=None):
         stat['matches'] = len(match_goals)
         stat['goals_against'] = sum(match_goals.values())
 
-    # Count total distinct completed league match days for the 80% minimum rule
-    completed_league_match_days = FixtureMatch.objects.filter(
+    # Count total distinct completed match days (any stage) for the 80% minimum rule.
+    # Must match the stage-agnostic scope used for goals/matches above, otherwise a
+    # tournament that has moved past the league stage into knockouts would show 0
+    # completed match days even though players have kept playing.
+    completed_match_days = FixtureMatch.objects.filter(
         competition=competition,
-        stage='league',
         status='completed',
     ).values_list('match_day', flat=True).distinct().count()
 
-    # A player must have played in at least 80% of completed league match days
+    # A player must have played in at least 80% of completed match days.
     # Use ceil so partial fractions always round UP (e.g. 80% of 5 days = 4.0 → needs 4 matches)
-    min_matches_required = max(1, math.ceil(completed_league_match_days * 0.80))
+    min_matches_required = max(1, math.ceil(completed_match_days * 0.80))
 
     goal_stats = sorted(
         stats.values(),
@@ -217,6 +219,6 @@ def _fixture_player_stats(competition, request=None):
     )
     stats_meta = {
         'defence_min_matches': min_matches_required,
-        'defence_total_match_days': completed_league_match_days,
+        'defence_total_match_days': completed_match_days,
     }
     return goal_stats, defence_stats, stats_meta

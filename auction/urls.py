@@ -12,6 +12,10 @@ urlpatterns = [
     path('teams/registry/', views.TeamRegistryView.as_view(), name='team-registry'),
     path('teams/<int:pk>/', views.TeamDetailView.as_view(), name='team-detail'),
 
+    # Auctioneers (manager only)
+    path('auctioneers/', views.AuctioneerListCreateView.as_view(), name='auctioneer-list-create'),
+    path('auctioneers/<int:pk>/', views.AuctioneerDetailView.as_view(), name='auctioneer-detail'),
+
     # Auctions
     path('auctions/', views.AuctionListCreateView.as_view(), name='auction-list-create'),
     path('auctions/<str:auction_id>/', views.AuctionDetailView.as_view(), name='auction-detail'),
