@@ -745,13 +745,71 @@ class PlayerPriceUpdateView(APIView):
 
 # ── Auction Control View ──────────────────────────────────────────────────────
 
+class TeamAdjustView(APIView):
+    """Lets a manager top up or deduct a team's balance, and grant or revoke
+    roster slots, mid-auction — e.g. a sponsor adds a late top-up, or a squad
+    needs one more slot than the auction default. Additive rather than
+    absolute so the manager doesn't need to know the team's current numbers;
+    negative values remove balance/slots (balance floors at 0, slots floor at
+    the number of players already won).
+    """
+    permission_classes = [IsManagerPermission]
+
+    def patch(self, request, auction_id, team_id):
+        try:
+            auction = Auction.objects.get(id=auction_id, manager=request.user)
+        except Auction.DoesNotExist:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+
+        try:
+            auction_team = AuctionTeam.objects.select_related('team').get(auction=auction, team_id=team_id)
+        except AuctionTeam.DoesNotExist:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+
+        try:
+            add_balance = int(request.data.get('add_balance') or 0)
+        except (TypeError, ValueError):
+            return Response({'error': 'add_balance must be an integer.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            add_slots = int(request.data.get('add_slots') or 0)
+        except (TypeError, ValueError):
+            return Response({'error': 'add_slots must be an integer.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if add_balance == 0 and add_slots == 0:
+            return Response({'error': 'Provide add_balance and/or add_slots.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        update_fields = []
+        if add_balance:
+            auction_team.balance = max(0, auction_team.balance + add_balance)
+            update_fields.append('balance')
+        if add_slots:
+            base = auction_team.max_players or auction.max_players_per_team
+            # Never shrink the roster below what the team has already won.
+            won_count = SoldResult.objects.filter(auction=auction, team_id=team_id).count()
+            auction_team.max_players = max(won_count, base + add_slots)
+            update_fields.append('max_players')
+
+        auction_team.save(update_fields=update_fields)
+
+        group_name = f'auction_{auction_id}'
+        teams_data = AuctionTeamSerializer(
+            AuctionTeam.objects.filter(auction=auction).select_related('team'), many=True
+        ).data
+        get_channel_layer_broadcast(group_name, {
+            'type': 'teams_update',
+            'teams': teams_data,
+        })
+
+        return Response(AuctionTeamSerializer(auction_team).data)
+
+
 class AuctionControlView(APIView):
-    # Managers get every action; auctioneers get pause/resume only, and only
-    # for auctions their manager explicitly assigned them. Enforced below
+    # Managers get every action; auctioneers get pause/resume/next-player, and
+    # only for auctions their manager explicitly assigned them. Enforced below
     # rather than via permission_classes since it depends on the request body.
     permission_classes = [IsAuthenticated]
 
-    AUCTIONEER_ALLOWED_ACTIONS = {'pause', 'resume', 'start_count'}
+    AUCTIONEER_ALLOWED_ACTIONS = {'pause', 'resume', 'start_count', 'next_player'}
 
     def post(self, request, auction_id):
         action = request.data.get('action')
@@ -765,7 +823,7 @@ class AuctionControlView(APIView):
         elif user.role == 'auctioneer':
             if action not in self.AUCTIONEER_ALLOWED_ACTIONS:
                 return Response(
-                    {'error': 'Auctioneers may only pause or resume.'},
+                    {'error': 'Auctioneers may only pause, resume, count, or advance to the next player.'},
                     status=status.HTTP_403_FORBIDDEN
                 )
             try:

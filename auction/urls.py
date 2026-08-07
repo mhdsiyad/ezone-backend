@@ -28,6 +28,9 @@ urlpatterns = [
     # Auction Control
     path('auctions/<str:auction_id>/control/', views.AuctionControlView.as_view(), name='auction-control'),
 
+    # Per-team mid-auction adjustments (manager only)
+    path('auctions/<str:auction_id>/teams/<int:team_id>/adjust/', views.TeamAdjustView.as_view(), name='team-adjust'),
+
     # Bids
     path('auctions/<str:auction_id>/bids/', views.BidListCreateView.as_view(), name='bid-list-create'),
 
